@@ -34,9 +34,10 @@ except Exception:
 
 DB_PATH = "midas_capital.db"
 
-RH_GREEN = "#00C805"
-RH_RED   = "#FF5000"
-RH_GOLD  = "#D4A017"
+RH_GREEN  = "#00C805"
+RH_RED    = "#FF5000"
+RH_GOLD   = "#D4A017"
+ZIMA_BLUE = "#6FC3DF"   # Zima Blue — button accent
 
 UNIVERSE = pd.DataFrame([
     ("AAPL","Apple","Technology"),
@@ -92,7 +93,7 @@ FEATURE_COLS = [
 ]
 
 # ============================================================
-# DATABASE LAYER — SQLite Persistence
+# DATABASE LAYER
 # ============================================================
 
 def get_db():
@@ -144,25 +145,19 @@ def init_db():
 def db_load_state():
     con = get_db()
     cur = con.cursor()
-
     cur.execute("SELECT cash,initial_cash,starting_capital FROM account WHERE id=1")
     row = cur.fetchone()
     cash, ic, sc = row if row else (10000.0, 10000.0, 10000.0)
-
     cur.execute("SELECT ticker,shares,avg_cost FROM portfolio")
     positions = {r[0]: {"shares": r[1], "avg_cost": r[2]} for r in cur.fetchall()}
-
     cur.execute("SELECT time,side,ticker,shares,price,notional FROM trades ORDER BY id")
     rows = cur.fetchall()
     trades_df = pd.DataFrame(rows, columns=["Time","Side","Ticker","Shares","Price","Notional"]) \
                 if rows else pd.DataFrame(columns=["Time","Side","Ticker","Shares","Price","Notional"])
-
     cur.execute("SELECT timestamp,equity,trade_count FROM equity_history ORDER BY id")
     eq_hist = [{"timestamp": r[0], "equity": r[1], "trade_count": r[2]} for r in cur.fetchall()]
-
     cur.execute("SELECT ticker FROM watchlist")
     watchlist = [r[0] for r in cur.fetchall()]
-
     con.close()
     return cash, ic, sc, positions, trades_df, eq_hist, watchlist
 
@@ -222,11 +217,9 @@ st.set_page_config(
 init_db()
 
 # ============================================================
-# CSS — ROBINHOOD DARK THEME
+# CSS — DARK THEME (Zima Blue buttons, Crimson active tabs)
 # ============================================================
 
-# ── st.html() injects raw HTML without stripping <style> tags (Streamlit 1.31+)
-# ── Falls back to st.markdown for older installs
 def _inject_html(html: str):
     try:
         st.html(html)
@@ -245,20 +238,20 @@ html,body,[class*="css"]{
 [data-testid="stSidebar"]{background:#0a0a0a!important;border-right:1px solid #1a1a1a!important;}
 [data-testid="stSidebar"] *{color:#ccc!important;}
 
-/* Tabs */
+/* Tabs — crimson active state */
 .stTabs [data-baseweb="tab-list"]{background:#000!important;border-bottom:1px solid #1e1e1e!important;gap:0!important;}
 .stTabs [data-baseweb="tab"]{background:transparent!important;color:#666!important;border-radius:0!important;
     padding:14px 22px!important;font-weight:500!important;border-bottom:2px solid transparent!important;font-size:14px!important;}
-.stTabs [aria-selected="true"]{background:transparent!important;color:#fff!important;
-    border-bottom:2px solid #00C805!important;font-weight:700!important;}
+.stTabs [aria-selected="true"]{background:transparent!important;color:#E63946!important;
+    border-bottom:2px solid #E63946!important;font-weight:700!important;}
 .stTabs [data-baseweb="tab"]:hover{color:#fff!important;}
 .stTabs [data-baseweb="tab"] p,.stTabs [data-baseweb="tab"] span,.stTabs [data-baseweb="tab"] div{color:inherit!important;}
 
-/* Buttons */
-.stButton>button{background:#00C805!important;color:#000!important;border:none!important;
+/* Buttons — Zima Blue */
+.stButton>button{background:#6FC3DF!important;color:#000!important;border:none!important;
     border-radius:24px!important;padding:10px 28px!important;font-weight:700!important;
     font-size:14px!important;transition:all 0.2s!important;}
-.stButton>button:hover{background:#00a003!important;transform:scale(1.02)!important;}
+.stButton>button:hover{background:#5AB3CF!important;transform:scale(1.02)!important;}
 
 /* Inputs */
 .stTextInput input,.stNumberInput input{background:#111!important;color:#fff!important;
@@ -306,11 +299,16 @@ html,body,[class*="css"]{
 .dot-x{background:#555;animation:none;}
 @keyframes blink{0%,100%{opacity:1}50%{opacity:.3}}
 
-/* God mode */
+/* God mode banner */
 .godmode{background:linear-gradient(90deg,#b8860b,#FFD700,#b8860b);
     color:#000;padding:8px;text-align:center;font-weight:900;font-size:13px;
     letter-spacing:2px;animation:glow 2s ease-in-out infinite;}
 @keyframes glow{0%,100%{opacity:1}50%{opacity:.75}}
+
+/* Demo mode banner */
+.demobanner{background:#1a2a3a;border:1px solid #6FC3DF;color:#6FC3DF;
+    padding:8px 14px;text-align:center;font-weight:700;font-size:13px;
+    letter-spacing:1px;border-radius:8px;margin:6px 0;}
 
 /* Section headers */
 .sh{font-size:18px;font-weight:700;color:#fff;margin:20px 0 10px;
@@ -327,7 +325,7 @@ hr{border-color:#1e1e1e!important;}
 """)
 
 # ============================================================
-# SESSION STATE — loads from SQLite on first run
+# SESSION STATE
 # ============================================================
 
 def init_state():
@@ -347,6 +345,7 @@ def init_state():
         "sim_seed":      42,
         "auto_refresh":  True,
         "god_mode":      False,
+        "demo_mode":     False,
         "win_streak":    0,
         "loss_streak":   0,
         "midas_shown":   False,
@@ -363,7 +362,9 @@ init_state()
 # ============================================================
 
 def market_status():
-    """Returns (code, label, dot_class) — code: open|pre|after|closed"""
+    """Returns (code, label, dot_class). demo_mode forces 'open'."""
+    if st.session_state.get("demo_mode", False):
+        return "open", "Market Open (Demo)", "dot-g"
     if not PYTZ_AVAILABLE:
         return "open", "Market Open", "dot-g"
     try:
@@ -383,7 +384,6 @@ def market_status():
         return "open", "Market Open", "dot-g"
 
 def ext_price(ticker):
-    """Try to get pre/after-market price from yfinance info dict."""
     if not YF_AVAILABLE:
         return None, None
     try:
@@ -430,7 +430,6 @@ def price_df(ticker, mode, seed):
     t = ticker.strip().upper()
     if not t:
         return pd.DataFrame(), False
-    # DOGE support
     if t == "DOGE" and mode == "Live (yfinance)":
         return _live("DOGE-USD")
     if mode == "Live (yfinance)":
@@ -449,7 +448,7 @@ def ticker_ok(ticker, mode, seed):
     return ok and not df.empty
 
 # ============================================================
-# ML ENGINE
+# ML ENGINE — Trend Alignment Score (replaces Greed Factor)
 # ============================================================
 
 def tech_indicators(df):
@@ -474,7 +473,8 @@ def tech_indicators(df):
     d["Volatility"]  = d["Close"].rolling(20).std()
     return d
 
-def run_model(df, god=False):
+def run_model(df):
+    """Train Random Forest and return prediction with Trend Alignment Score."""
     df = tech_indicators(df).dropna()
     if len(df) < 60:
         return None, None
@@ -493,20 +493,38 @@ def run_model(df, god=False):
     m = RandomForestRegressor(n_estimators=100, max_depth=10, random_state=42)
     m.fit(Xtr, y[:split])
 
-    pred  = m.predict(scaler.transform(df[FEATURE_COLS].iloc[-1:].values))[0]
-    cur   = df["Close"].iloc[-1]
-    if god:
-        pred = cur * 1.09
+    pred = m.predict(scaler.transform(df[FEATURE_COLS].iloc[-1:].values))[0]
+    cur  = df["Close"].iloc[-1]
+
+    # ── Trend Alignment Score ─────────────────────────────────
+    # Checks how many of 4 key technical conditions are bullish.
+    # Each satisfied condition shifts the forecast slightly upward (+0.5%),
+    # and each unsatisfied condition shifts it slightly downward (-0.5%).
+    last_row = df[FEATURE_COLS].iloc[-1]
+    trend_score = int(sum([
+        last_row["SMA_5"]        > last_row["SMA_20"],   # short MA above medium MA
+        last_row["SMA_20"]       > last_row["SMA_50"],   # medium MA above long MA
+        last_row["MACD"]         > last_row["MACD_Signal"], # MACD bullish crossover
+        last_row["RSI"]          > 50,                   # momentum positive
+    ]))
+    # Score 0-4 → bias -1% to +1% in 0.5% steps
+    trend_bias = (trend_score - 2) * 0.005
+    pred = pred * (1 + trend_bias)
 
     mape = np.mean(np.abs((y[split:]-m.predict(Xte))/y[split:]))*100 if len(Xte) else 0
-    conf = 99.0 if god else max(0, min(100, 100-mape))
+    conf = max(0, min(100, 100 - mape))
+
+    trend_labels = ["Strong Bearish", "Bearish", "Neutral", "Bullish", "Strong Bullish"]
 
     return {
-        "prediction": pred, "current": cur,
-        "change_pct": (pred-cur)/cur*100,
+        "prediction": pred,
+        "current":    cur,
+        "change_pct": (pred - cur) / cur * 100,
         "confidence": conf,
-        "signal": "BUY",
-        "importance": dict(zip(FEATURE_COLS, m.feature_importances_))
+        "signal":     "BUY" if pred >= cur else "SELL",
+        "trend_score": trend_score,
+        "trend_label": trend_labels[trend_score],
+        "importance":  dict(zip(FEATURE_COLS, m.feature_importances_))
     }, df
 
 # ============================================================
@@ -576,11 +594,11 @@ def place_order(side, ticker, shares, mode, seed):
     notional = shares * px
     now_str  = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
-    # ── Easter egg: Warren Buffett warning ──────────────────
+    # Easter egg: Warren Buffett warning
     if side == "SELL" and t in st.session_state.last_buy_ts:
         secs = (datetime.now() - st.session_state.last_buy_ts[t]).total_seconds()
         if secs < 10:
-            st.warning("⚠️ *Warren Buffett has been holding Coca-Cola since 1988. Just saying.*")
+            st.warning("*Warren Buffett has been holding Coca-Cola since 1988. Just saying.*")
 
     if side == "BUY":
         if notional > st.session_state.cash + 1e-9:
@@ -608,9 +626,9 @@ def place_order(side, ticker, shares, mode, seed):
         else:
             st.session_state.loss_streak += 1
             st.session_state.win_streak   = 0
-            # ── Easter egg: Loss streak stoic quote ──────────
+            # Easter egg: Loss streak — Stoic quote
             if st.session_state.loss_streak >= 3:
-                st.info(f"📜 {random.choice(STOIC_QUOTES)}")
+                st.info(random.choice(STOIC_QUOTES))
         st.session_state.cash += notional
         st.session_state.positions[t]["shares"] -= shares
         if st.session_state.positions[t]["shares"] <= 1e-9:
@@ -633,19 +651,17 @@ def place_order(side, ticker, shares, mode, seed):
     db_update_account(st.session_state.cash, st.session_state.initial_cash,
                       st.session_state.starting_capital_input)
 
-    # ── Easter egg: Penny stock mode ─────────────────────────
+    # Easter egg: Penny stock mode
     if st.session_state.starting_capital_input < 100:
-        st.success(f"🪙 Budget Edition — {side} {shares:g} × {t} @ ${px:,.4f}")
+        st.success(f"Budget Edition — {side} {shares:g} x {t} @ ${px:,.4f}")
     else:
-        st.success(f"✅ {side} {shares:g} × {t} @ ${px:,.2f}  |  ${notional:,.2f}")
+        st.success(f"Order Confirmed: {side} {shares:g} x {t} @ ${px:,.2f}  |  ${notional:,.2f}")
 
-    # ── Easter egg: Midas Touch ──────────────────────────────
+    # Easter egg: Midas Touch — doubled starting capital
     if not st.session_state.midas_shown and st.session_state.initial_cash > 0:
         if abs(m["equity"] - st.session_state.initial_cash * 2) < 1.0:
             st.balloons()
-            _inject_html(
-                '<div class="godmode">✨ YOU\'VE ACHIEVED THE MIDAS TOUCH ✨</div>'
-            )
+            _inject_html('<div class="godmode">YOU HAVE ACHIEVED THE MIDAS TOUCH</div>')
             st.session_state.midas_shown = True
     return True
 
@@ -666,7 +682,7 @@ def ticker_tape(mode, seed):
             prev = df["Close"].iloc[-2]
             chg  = (px-prev)/prev*100 if np.isfinite(px) else 0
         col = RH_GREEN if chg >= 0 else RH_RED
-        arr = "▲" if chg >= 0 else "▼"
+        arr = "+" if chg >= 0 else "-"
         pxs = f"${px:,.2f}" if np.isfinite(px) else "—"
         items += (f'<span class="tick">'
                   f'<span class="tick-sym">{t}</span>'
@@ -681,19 +697,20 @@ def status_bar(m, mode):
     code, label, dot_cls = market_status()
     title = "Midas Capital Systems"
     if st.session_state.starting_capital_input < 100:
-        title += " 🪙 Budget Edition"
-    god_badge = " &nbsp;<span style='color:#D4A017;font-weight:900;'>👑 GOD MODE</span>" \
+        title += " — Budget Edition"
+    god_badge = " &nbsp;<span style='color:#D4A017;font-weight:900;'>GOD MODE</span>" \
                 if st.session_state.god_mode else ""
+    demo_badge = " &nbsp;<span style='color:#6FC3DF;font-weight:900;'>DEMO MODE</span>" \
+                 if st.session_state.get("demo_mode", False) else ""
     rc = RH_GREEN if m["ret"] >= 0 else RH_RED
-    arr = "▲" if m["ret"] >= 0 else "▼"
-    # After-hours note
+    arr = "+" if m["ret"] >= 0 else "-"
     ah_note = ""
-    if code in ("pre","after"):
+    if code in ("pre","after") and not st.session_state.get("demo_mode", False):
         ah_note = (f"<span style='color:#f59e0b;font-size:11px;margin-left:16px;'>"
-                   f"⏰ {'Pre-market' if code=='pre' else 'After-hours'} — prices reflect last close</span>")
+                   f"{'Pre-market' if code=='pre' else 'After-hours'} — prices reflect last close</span>")
     _inject_html(f"""
     <div class="sbar">
-        <div style="font-size:16px;font-weight:900;color:#fff;">{title}{god_badge}</div>
+        <div style="font-size:16px;font-weight:900;color:#fff;">{title}{god_badge}{demo_badge}</div>
         <div style="margin-left:auto;display:flex;align-items:center;gap:28px;">
             <div>
                 <div style="font-size:10px;color:#555;text-transform:uppercase;letter-spacing:1px;">Portfolio</div>
@@ -715,7 +732,7 @@ def status_bar(m, mode):
     """)
 
 def mcard(label, value, sub=None, direction=None):
-    cls = ("up" if direction == "up" else "dn" if direction == "dn" else "")
+    cls     = ("up" if direction == "up" else "dn" if direction == "dn" else "")
     sub_cls = ("green" if direction == "up" else "red" if direction == "dn" else "")
     sub_html = f'<div class="msub {sub_cls}">{sub}</div>' if sub else ""
     _inject_html(f"""
@@ -734,11 +751,8 @@ seed = int(st.session_state.sim_seed)
 m    = get_metrics(mode, seed)
 
 with st.sidebar:
-    # Logo
     _inject_html("""
     <div style="padding:20px 0 14px;text-align:center;">
-
-        <!-- Custom SVG Logo -->
         <svg width="72" height="72" viewBox="0 0 72 72" xmlns="http://www.w3.org/2000/svg"
              style="display:block;margin:0 auto 10px;">
             <defs>
@@ -759,35 +773,20 @@ with st.sidebar:
                     <feGaussianBlur stdDeviation="1.5" result="blur"/>
                     <feMerge><feMergeNode in="blur"/><feMergeNode in="SourceGraphic"/></feMerge>
                 </filter>
-                <clipPath id="hexClip">
-                    <polygon points="36,3 66,19 66,53 36,69 6,53 6,19"/>
-                </clipPath>
             </defs>
-
-            <!-- Hex background -->
             <polygon points="36,3 66,19 66,53 36,69 6,53 6,19"
                      fill="url(#bgFill)" stroke="url(#goldRing)" stroke-width="2.5"/>
-
-            <!-- Inner hex subtle glow ring -->
             <polygon points="36,8 61,22 61,50 36,64 11,50 11,22"
                      fill="none" stroke="#D4A01730" stroke-width="1"/>
-
-            <!-- M letterform — two diagonal strokes meeting in centre -->
             <polyline points="16,50 16,24 36,42 56,24 56,50"
                       fill="none" stroke="url(#goldRing)"
                       stroke-width="4.5" stroke-linecap="round" stroke-linejoin="round"/>
-
-            <!-- Upward trend line (green, glowing) -->
             <polyline points="13,56 22,47 31,51 44,37 59,41"
                       fill="none" stroke="url(#greenLine)"
                       stroke-width="2" stroke-linecap="round"
                       filter="url(#glow)" opacity="0.9"/>
-
-            <!-- Dot at trend peak -->
             <circle cx="44" cy="37" r="2.2" fill="#00C805" filter="url(#glow)"/>
         </svg>
-
-        <!-- Wordmark -->
         <div style="font-size:15px;font-weight:900;color:#fff;letter-spacing:0.5px;
                     font-family:'DM Sans',sans-serif;line-height:1.2;">
             Midas Capital Systems
@@ -812,14 +811,14 @@ with st.sidebar:
 
     # Account summary card
     rc = RH_GREEN if m["ret"] >= 0 else RH_RED
-    arr = "▲" if m["ret"] >= 0 else "▼"
+    arr = "+" if m["ret"] >= 0 else "-"
     _inject_html(f"""
     <div class="card" style="margin-bottom:14px;">
         <div class="mlbl">Account Value</div>
         <div style="font-size:22px;font-weight:900;color:#fff;">${m['equity']:,.2f}</div>
         <div style="font-size:13px;color:{rc};margin-top:2px;">{arr}{abs(m['ret']):.2f}% all-time</div>
         <div style="font-size:11px;color:#444;margin-top:6px;">
-            Cash ${m['cash']:,.2f} · Held ${m['mv']:,.2f}
+            Cash ${m['cash']:,.2f} &middot; Held ${m['mv']:,.2f}
         </div>
     </div>""")
 
@@ -841,6 +840,13 @@ with st.sidebar:
     st.session_state.auto_refresh = st.checkbox("Auto-refresh prices (60s)",
                                                  value=st.session_state.auto_refresh)
 
+    # Demo Mode — forces market_status to "open" for presentations
+    st.session_state.demo_mode = st.checkbox(
+        "Demo Mode (force market open)",
+        value=st.session_state.get("demo_mode", False),
+        help="Enables trading outside market hours. Use for presentations and demos."
+    )
+
     _inject_html('<hr>')
 
     # Capital
@@ -860,68 +866,71 @@ with st.sidebar:
 
     # Streaks
     if st.session_state.win_streak >= 2:
-        _inject_html(f'<span class="badge badge-win">🔥 {st.session_state.win_streak}-Trade Win Streak</span>')
+        _inject_html(f'<span class="badge badge-win">{st.session_state.win_streak}-Trade Win Streak</span>')
     elif st.session_state.loss_streak >= 2:
-        _inject_html(f'<span class="badge badge-loss">❄️ {st.session_state.loss_streak} Losses in a Row</span>')
+        _inject_html(f'<span class="badge badge-loss">{st.session_state.loss_streak} Losses in a Row</span>')
 
     # Fund name generator
-    if st.button("🎲 Name My Fund", use_container_width=True):
+    if st.button("Name My Fund", use_container_width=True):
         st.session_state.fund_name = f"{random.choice(FUND_ADJ)} {random.choice(FUND_NOUN)} Capital Management"
     if st.session_state.fund_name:
         _inject_html(f'<div style="text-align:center;color:#555;font-size:11px;font-style:italic;margin-top:6px;">"{st.session_state.fund_name}"</div>')
 
     _inject_html('<hr>')
 
-    # ── Easter egg: secret input (type KONAMI or GODMODE) ───
+    # Secret easter egg input
     code_in = st.text_input("", placeholder="secret…", label_visibility="collapsed",
                              key="secret_input")
     if code_in.strip().upper() in ("KONAMI","GODMODE","MIDAS","UNLIMITED POWER"):
         st.session_state.god_mode = not st.session_state.god_mode
         st.session_state["secret_input"] = ""
         if st.session_state.god_mode:
-            st.success("👑 GOD MODE ACTIVATED")
+            st.success("GOD MODE ACTIVATED")
         else:
             st.info("God mode deactivated.")
 
     if st.session_state.god_mode:
-        _inject_html('<div class="godmode">👑 GOD MODE ACTIVE 👑</div>')
+        _inject_html('<div class="godmode">GOD MODE ACTIVE</div>')
 
 # ============================================================
 # MAIN CONTENT
 # ============================================================
 
 if st.session_state.god_mode:
-    _inject_html('<div class="godmode">👑 ALL ML SIGNALS BULLISH · GOD MODE ENGAGED 👑</div>')
+    _inject_html('<div class="godmode">ALL ML SIGNALS BULLISH · GOD MODE ENGAGED</div>')
+
+if st.session_state.get("demo_mode", False):
+    _inject_html('<div class="demobanner">DEMO MODE ACTIVE</div>')
 
 ticker_tape(mode, seed)
 m = get_metrics(mode, seed)
 status_bar(m, mode)
 
-# After-hours notice
+# After-hours notice (suppressed in demo mode)
 mkt_code, _, _ = market_status()
-if mkt_code in ("pre","after","closed"):
+if mkt_code in ("pre","after","closed") and not st.session_state.get("demo_mode", False):
     msgs = {
         "pre":    "Pre-market trading (4:00 AM – 9:30 AM ET). Prices reflect last regular-session close.",
         "after":  "After-hours trading (4:00 PM – 8:00 PM ET). Extended prices shown where available.",
         "closed": "Markets are closed. Prices reflect the last regular-session close.",
     }
-    _inject_html(f'<div class="alert-y">⏰ {msgs[mkt_code]}</div>')
+    _inject_html(f'<div class="alert-y">{msgs[mkt_code]}</div>')
 
-# ── Penny stock header ────────────────────────────────────────
+# Penny stock header
 if st.session_state.starting_capital_input < 100:
-    _inject_html('<div style="text-align:center;color:#f59e0b;font-size:13px;padding:6px 0;">🪙 Budget Edition — All prices shown to 4 decimal places</div>')
+    _inject_html('<div style="text-align:center;color:#f59e0b;font-size:13px;padding:6px 0;">Budget Edition — All prices shown to 4 decimal places</div>')
 
 # ============================================================
 # TABS
 # ============================================================
 
 tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs([
-    "📊 Dashboard", "🤖 AI Insights", "⚡ Trade",
-    "📁 Portfolio", "📈 Performance", "🗺️ Heatmap"
+    "Dashboard", "AI Insights", "Trade",
+    "Portfolio", "Performance", "Heatmap"
 ])
 
 # ============================================================
-# ── TAB 1: DASHBOARD ─────────────────────────────────────────
+# TAB 1: DASHBOARD
 # ============================================================
 
 with tab1:
@@ -930,7 +939,7 @@ with tab1:
     c1, c2, c3, c4 = st.columns(4)
     with c1:
         d = "up" if m["ret"] >= 0 else "dn"
-        arr = "▲" if m["ret"] >= 0 else "▼"
+        arr = "+" if m["ret"] >= 0 else "-"
         mcard("Total Equity", f"${m['equity']:,.2f}",
               f"{arr}{abs(m['ret']):.2f}%", d)
     with c2:
@@ -942,7 +951,7 @@ with tab1:
     with c4:
         upl = m["upl"]
         ud = "up" if upl >= 0 else "dn"
-        ua = "▲" if upl >= 0 else "▼"
+        ua = "+" if upl >= 0 else "-"
         up_pct = upl/st.session_state.initial_cash*100 if st.session_state.initial_cash > 0 else 0
         mcard("Unrealized P/L", f"${upl:,.2f}", f"{ua}{abs(up_pct):.2f}%", ud)
 
@@ -962,8 +971,8 @@ with tab1:
             ep, el = ext_price(t) if mode == "Live (yfinance)" else (None, None)
             rows.append({
                 "Ticker": t,
-                "Price": f"${px:,.2f}" if np.isfinite(px) else "—",
-                "Change": f"{'▲' if chg>=0 else '▼'}{abs(chg):.2f}%",
+                "Price":  f"${px:,.2f}" if np.isfinite(px) else "—",
+                "Change": f"{'+'if chg>=0 else '-'}{abs(chg):.2f}%",
                 "Ext-Hrs": f"${ep:,.2f} ({el})" if ep else "—",
             })
         st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
@@ -977,7 +986,7 @@ with tab1:
                     if t_ not in st.session_state.watchlist:
                         st.session_state.watchlist.append(t_)
                         db_update_watchlist(st.session_state.watchlist)
-                        st.info("🐕 Much watchlist. Very crypto. Such wow.")
+                        st.info("Much watchlist. Very crypto. Such wow.")
                         st.rerun()
                 elif t_ and ticker_ok(t_, mode, seed):
                     if t_ not in st.session_state.watchlist:
@@ -1015,12 +1024,12 @@ with tab1:
         """)
 
 # ============================================================
-# ── TAB 2: AI INSIGHTS ───────────────────────────────────────
+# TAB 2: AI INSIGHTS
 # ============================================================
 
 with tab2:
     _inject_html('<div class="sh">Machine Learning Price Predictions</div>')
-    st.caption("Random Forest ensemble · 14 technical indicator features · 5-day horizon")
+    st.caption("Random Forest ensemble · 14 technical indicator features · 5-day horizon · Trend Alignment scoring")
 
     ai_opts = sorted(set(st.session_state.watchlist) | set(ALL_TICKERS))
     ai_tkr  = st.selectbox("Select ticker", ai_opts)
@@ -1032,28 +1041,50 @@ with tab2:
             with st.spinner("Training on historical data…"):
                 df_, ok_ = price_df(ai_tkr, mode, seed)
                 if ok_ and len(df_) > 60:
-                    res, edf = run_model(df_, god=st.session_state.god_mode)
+                    res, edf = run_model(df_)
                     if res:
                         r1, r2, r3 = st.columns(3)
                         with r1: mcard("Current Price", f"${res['current']:,.2f}")
                         with r2:
                             d_ = "up" if res["change_pct"] >= 0 else "dn"
                             mcard("5-Day Forecast", f"${res['prediction']:,.2f}",
-                                  f"{'▲' if res['change_pct']>=0 else '▼'}{abs(res['change_pct']):.2f}%", d_)
+                                  f"{'+'if res['change_pct']>=0 else '-'}{abs(res['change_pct']):.2f}%", d_)
                         with r3: mcard("Confidence", f"{res['confidence']:.0f}%")
 
                         sc_ = RH_GREEN if res["signal"] == "BUY" else RH_RED
-                        gm  = " 👑 (GOD MODE)" if st.session_state.god_mode else ""
+
                         _inject_html(f"""
                         <div style="background:{sc_}18;border:2px solid {sc_};color:{sc_};
                                     padding:14px;border-radius:10px;text-align:center;
                                     font-size:18px;font-weight:900;letter-spacing:2px;margin:12px 0;">
-                            {"⬆" if res["signal"]=="BUY" else "⬇"} MODEL SIGNAL: {res["signal"]}{gm}
+                            {"&#x2B06;" if res["signal"]=="BUY" else "&#x2B07;"} MODEL SIGNAL: {res["signal"]}
                         </div>""")
 
-                        # Feature importance — explicit bgcolor fixes transparency
+                        # Trend Alignment panel
+                        ta_score = res["trend_score"]
+                        ta_label = res["trend_label"]
+                        ta_col   = RH_GREEN if ta_score >= 3 else (RH_RED if ta_score <= 1 else "#f59e0b")
+                        bar_fill = int(ta_score / 4 * 100)
+                        _inject_html(f"""
+                        <div class="card" style="margin:10px 0;">
+                            <div class="mlbl">Trend Alignment Score</div>
+                            <div style="display:flex;align-items:center;gap:12px;margin-top:6px;">
+                                <div style="font-size:22px;font-weight:900;color:{ta_col};">{ta_score}/4</div>
+                                <div style="flex:1;">
+                                    <div style="background:#1e1e1e;border-radius:4px;height:8px;">
+                                        <div style="background:{ta_col};width:{bar_fill}%;height:8px;border-radius:4px;transition:width 0.4s;"></div>
+                                    </div>
+                                    <div style="font-size:12px;color:{ta_col};margin-top:4px;font-weight:700;">{ta_label}</div>
+                                </div>
+                            </div>
+                            <div style="font-size:11px;color:#555;margin-top:8px;">
+                                SMA5&gt;SMA20 &nbsp;|&nbsp; SMA20&gt;SMA50 &nbsp;|&nbsp; MACD crossover &nbsp;|&nbsp; RSI &gt; 50
+                            </div>
+                        </div>""")
+
+                        # Feature importance chart
                         imp = pd.DataFrame({
-                            "Feature": list(res["importance"].keys()),
+                            "Feature":    list(res["importance"].keys()),
                             "Importance": list(res["importance"].values())
                         }).sort_values("Importance").tail(10)
                         fig_i = go.Figure(go.Bar(
@@ -1063,17 +1094,15 @@ with tab2:
                         ))
                         fig_i.update_layout(
                             title="Top 10 Predictive Features",
-                            plot_bgcolor="#111111",
-                            paper_bgcolor="#111111",
-                            font=dict(color="#fff"),
-                            height=320,
+                            plot_bgcolor="#111111", paper_bgcolor="#111111",
+                            font=dict(color="#fff"), height=320,
                             xaxis=dict(gridcolor="#2a2a2a"),
                             yaxis=dict(gridcolor="#2a2a2a"),
                             margin=dict(l=10,r=10,t=40,b=10)
                         )
                         st.plotly_chart(fig_i, use_container_width=True)
 
-                        # Technical charts — explicit bgcolor
+                        # Technical charts (BB fill opacity raised to 0.18 for visibility)
                         fig_t = make_subplots(
                             rows=3, cols=1,
                             subplot_titles=("Price & Moving Averages","RSI","MACD"),
@@ -1086,11 +1115,11 @@ with tab2:
                             line=dict(color="#6366f1",dash="dash")), row=1,col=1)
                         fig_t.add_trace(go.Scatter(x=edf.index,y=edf["SMA_50"],name="SMA50",
                             line=dict(color="#f59e0b",dash="dash")), row=1,col=1)
-                        fig_t.add_trace(go.Scatter(x=edf.index,y=edf["BB_Upper"],name="BB+",
-                            line=dict(color="#333",width=1,dash="dot")), row=1,col=1)
-                        fig_t.add_trace(go.Scatter(x=edf.index,y=edf["BB_Lower"],name="BB-",
-                            line=dict(color="#333",width=1,dash="dot"),
-                            fill="tonexty",fillcolor="rgba(100,100,100,0.08)"), row=1,col=1)
+                        fig_t.add_trace(go.Scatter(x=edf.index,y=edf["BB_Upper"],name="BB Upper",
+                            line=dict(color="#555",width=1,dash="dot")), row=1,col=1)
+                        fig_t.add_trace(go.Scatter(x=edf.index,y=edf["BB_Lower"],name="BB Lower",
+                            line=dict(color="#555",width=1,dash="dot"),
+                            fill="tonexty", fillcolor="rgba(111,195,223,0.18)"), row=1,col=1)
                         fig_t.add_trace(go.Scatter(x=edf.index,y=edf["RSI"],name="RSI",
                             line=dict(color="#ec4899")), row=2,col=1)
                         fig_t.add_hline(y=70,line_dash="dash",line_color="#FF5000",row=2,col=1)
@@ -1101,8 +1130,7 @@ with tab2:
                             line=dict(color="#f97316")), row=3,col=1)
                         fig_t.update_layout(
                             height=780,
-                            plot_bgcolor="#111111",
-                            paper_bgcolor="#111111",
+                            plot_bgcolor="#111111", paper_bgcolor="#111111",
                             font=dict(color="#fff"),
                             legend=dict(bgcolor="#111111",bordercolor="#2a2a2a"),
                         )
@@ -1143,8 +1171,7 @@ with tab2:
             gauge=dict(
                 axis=dict(range=[0,100],tickcolor="#444"),
                 bar=dict(color=mood_col_),
-                bgcolor="#1a1a1a",
-                bordercolor="#2a2a2a",
+                bgcolor="#1a1a1a", bordercolor="#2a2a2a",
                 steps=[
                     dict(range=[0,30],   color="rgba(0,200,5,0.06)"),
                     dict(range=[30,45],  color="rgba(99,102,241,0.06)"),
@@ -1163,7 +1190,7 @@ with tab2:
         _inject_html(f'<div style="text-align:center;font-size:20px;font-weight:900;color:{mood_col_};margin-top:-10px;">{mood_lbl}</div>')
 
 # ============================================================
-# ── TAB 3: TRADE ─────────────────────────────────────────────
+# TAB 3: TRADE
 # ============================================================
 
 with tab3:
@@ -1176,7 +1203,7 @@ with tab3:
         tkr = manual.strip().upper() if manual.strip() else pick
 
         if tkr == "DOGE":
-            _inject_html('<div style="color:#f59e0b;font-size:13px;">🐕 Much wow. Very trade. Such Dogecoin.</div>')
+            _inject_html('<div style="color:#f59e0b;font-size:13px;">Much wow. Very trade. Such Dogecoin.</div>')
 
         side = st.radio("Order type", ["BUY","SELL"], horizontal=True)
         shares_in = st.number_input("Shares", min_value=0.0, value=1.0, step=1.0)
@@ -1204,8 +1231,9 @@ with tab3:
             if place_order(side, tkr, float(shares_in), mode, seed):
                 st.rerun()
 
-        if mkt_code in ("after","pre","closed") and mode == "Live (yfinance)":
-            _inject_html('<div style="color:#f59e0b;font-size:11px;margin-top:8px;">⏰ Outside market hours — prices are last close</div>')
+        if mkt_code in ("after","pre","closed") and mode == "Live (yfinance)" \
+                and not st.session_state.get("demo_mode", False):
+            _inject_html('<div style="color:#f59e0b;font-size:11px;margin-top:8px;">Outside market hours — prices are last close</div>')
 
     with r_:
         df_, ok_ = price_df(tkr, mode, seed)
@@ -1240,7 +1268,7 @@ with tab3:
             st.error("No price data available.")
 
 # ============================================================
-# ── TAB 4: PORTFOLIO ─────────────────────────────────────────
+# TAB 4: PORTFOLIO
 # ============================================================
 
 with tab4:
@@ -1265,19 +1293,18 @@ with tab4:
             })
         st.dataframe(pd.DataFrame(pos_rows), use_container_width=True, hide_index=True)
 
-        # Rebalance suggester
-        if st.button("⚖️ Suggest Equal-Weight Rebalance"):
+        if st.button("Suggest Equal-Weight Rebalance"):
             n  = len(st.session_state.positions)
             tv = sum(p_["shares"]*cur_price(t_,mode,seed) for t_,p_ in st.session_state.positions.items())
             tgt= tv / n
             sugg = []
             for t_,p_ in st.session_state.positions.items():
-                cv = p_["shares"] * cur_price(t_,mode,seed)
+                cv  = p_["shares"] * cur_price(t_,mode,seed)
                 px_ = cur_price(t_,mode,seed)
                 diff= tgt - cv
                 act = "Buy" if diff > 0 else "Sell"
                 sh  = abs(diff)/px_ if px_ > 0 else 0
-                sugg.append(f"{'▲' if diff>0 else '▼'} {act} {sh:.2f} {t_}  (${abs(diff):,.0f})")
+                sugg.append(f"{'+'if diff>0 else '-'} {act} {sh:.2f} {t_}  (${abs(diff):,.0f})")
             _inject_html('<div class="card"><div class="mlbl">Rebalance Preview — not executed</div>' +
                         "".join(f"<div style='padding:3px 0;color:#ccc;font-size:13px;'>{s}</div>" for s in sugg) +
                         "</div>")
@@ -1294,22 +1321,16 @@ with tab4:
                 sec_= sec_.iloc[0] if len(sec_) else "Unknown"
                 sv[sec_] = sv.get(sec_,0) + p_["shares"]*px_
             tv = sum(sv.values())
-
             fig_d = go.Figure(go.Pie(
-                labels=list(sv.keys()),
-                values=list(sv.values()),
-                hole=0.55,
+                labels=list(sv.keys()), values=list(sv.values()), hole=0.55,
                 marker=dict(colors=[SECTOR_COLORS.get(s,"#475569") for s in sv],
                             line=dict(color="#000",width=2)),
-                textinfo="label+percent",
-                textfont=dict(size=12,color="#fff"),
+                textinfo="label+percent", textfont=dict(size=12,color="#fff"),
                 hovertemplate="<b>%{label}</b><br>$%{value:,.2f}<br>%{percent}<extra></extra>",
                 direction="clockwise"
             ))
             fig_d.update_layout(
-                paper_bgcolor="#111111",
-                plot_bgcolor="#111111",
-                font=dict(color="#fff"),
+                paper_bgcolor="#111111", plot_bgcolor="#111111", font=dict(color="#fff"),
                 height=380, showlegend=True,
                 legend=dict(bgcolor="#111111",bordercolor="#2a2a2a",font=dict(color="#fff")),
                 margin=dict(l=10,r=10,t=10,b=10),
@@ -1330,30 +1351,27 @@ with tab4:
                 if len(cdata) >= 2:
                     cm = pd.DataFrame(cdata).dropna().corr()
                     fig_cr = go.Figure(go.Heatmap(
-                        z=cm.values,
-                        x=cm.columns.tolist(),
-                        y=cm.index.tolist(),
+                        z=cm.values, x=cm.columns.tolist(), y=cm.index.tolist(),
                         colorscale=[[0,RH_RED],[0.5,"#2a2a2a"],[1,RH_GREEN]],
-                        zmin=-1,zmax=1,
-                        text=np.round(cm.values,2),
-                        texttemplate="%{text}",
+                        zmin=-1, zmax=1,
+                        text=np.round(cm.values,2), texttemplate="%{text}",
                         textfont=dict(color="#fff",size=11),
-                        hovertemplate="%{x} × %{y}: %{z:.2f}<extra></extra>"
+                        hovertemplate="%{x} x %{y}: %{z:.2f}<extra></extra>"
                     ))
                     fig_cr.update_layout(
                         paper_bgcolor="#111111", plot_bgcolor="#111111",
                         font=dict(color="#fff"), height=380,
                         margin=dict(l=10,r=10,t=10,b=10),
-                        xaxis=dict(color="#888"),yaxis=dict(color="#888")
+                        xaxis=dict(color="#888"), yaxis=dict(color="#888")
                     )
                     st.plotly_chart(fig_cr, use_container_width=True)
                 else:
                     st.info("Need price data for at least 2 held stocks.")
             else:
-                st.info("Hold ≥ 2 positions to see correlation.")
+                st.info("Hold 2 or more positions to see correlation.")
 
 # ============================================================
-# ── TAB 5: PERFORMANCE ───────────────────────────────────────
+# TAB 5: PERFORMANCE
 # ============================================================
 
 with tab5:
@@ -1361,17 +1379,19 @@ with tab5:
     eq = st.session_state.equity_history
 
     if len(eq) > 1:
-        evals = [e["equity"] for e in eq]
-        tcount= list(range(1, len(evals)+1))
-        ic    = st.session_state.initial_cash
-        ret_  = [(v-ic)/ic*100 for v in evals]
-        is_up = evals[-1] >= ic
-        lc    = RH_GREEN if is_up else RH_RED
+        evals  = [e["equity"] for e in eq]
+        tcount = list(range(1, len(evals)+1))
+        ic     = st.session_state.initial_cash
+        ret_   = [(v-ic)/ic*100 for v in evals]
+        is_up  = evals[-1] >= ic
+        lc     = RH_GREEN if is_up else RH_RED
 
         mn, mx = min(evals), max(evals)
-        pad    = max((mx-mn)*0.18, ic*0.03)
+        # Tight Y-axis: pad only 15% of the actual data range (no artificial minimum)
+        data_range = mx - mn
+        pad = max(data_range * 0.15, 10)   # at least $10 padding each side
 
-        # ── Equity curve — X = trade count, tight Y-axis ──────
+        # Equity curve
         fig_eq = go.Figure()
         fig_eq.add_hline(y=ic, line_dash="dot", line_color="#444",
                          annotation_text="Starting Capital",
@@ -1379,8 +1399,7 @@ with tab5:
                          annotation_position="right")
         fig_eq.add_trace(go.Scatter(
             x=tcount, y=evals,
-            mode="lines+markers",
-            name="Equity",
+            mode="lines+markers", name="Equity",
             line=dict(color=lc,width=3),
             marker=dict(size=7,color=lc,line=dict(width=1,color="#000")),
             fill="tozeroy",
@@ -1389,7 +1408,7 @@ with tab5:
         ))
         fig_eq.update_layout(
             title=dict(
-                text=f"Equity Curve · {'▲' if is_up else '▼'}{abs(ret_[-1]):.2f}% total return",
+                text=f"Equity Curve · {'+'if is_up else '-'}{abs(ret_[-1]):.2f}% total return",
                 font=dict(color=lc,size=16)
             ),
             xaxis=dict(title="Trade Number",gridcolor="#2a2a2a",color="#888",
@@ -1403,7 +1422,7 @@ with tab5:
         )
         st.plotly_chart(fig_eq, use_container_width=True)
 
-        # ── Cumulative return bar chart ───────────────────────
+        # Cumulative return bar chart
         fig_r = go.Figure(go.Bar(
             x=tcount, y=ret_,
             marker_color=[RH_GREEN if r>=0 else RH_RED for r in ret_],
@@ -1420,7 +1439,7 @@ with tab5:
         )
         st.plotly_chart(fig_r, use_container_width=True)
 
-        # ── Monte Carlo ───────────────────────────────────────
+        # Monte Carlo
         if len(evals) >= 5:
             _inject_html('<div class="sh">Monte Carlo Projection — 30 Trading Days</div>')
             rets_arr = np.diff(evals)/np.array(evals[:-1])
@@ -1450,7 +1469,7 @@ with tab5:
             fig_mc.add_hline(y=evals[-1], line_dash="dot", line_color="#444")
             fig_mc.update_layout(
                 title=dict(
-                    text=f"Monte Carlo: 500 simulations · Median ${p50[-1]:,.0f}",
+                    text=f"Monte Carlo: 500 simulations — Median ${p50[-1]:,.0f}",
                     font=dict(color="#fff")),
                 xaxis=dict(title="Days Forward",gridcolor="#2a2a2a",color="#888"),
                 yaxis=dict(title="Portfolio Value ($)",gridcolor="#2a2a2a",color="#888"),
@@ -1473,7 +1492,7 @@ with tab5:
         st.info("No trades yet.")
 
 # ============================================================
-# ── TAB 6: HEATMAP ───────────────────────────────────────────
+# TAB 6: HEATMAP
 # ============================================================
 
 with tab6:
@@ -1483,22 +1502,37 @@ with tab6:
         hm = []
         for t_,p_ in st.session_state.positions.items():
             px_ = cur_price(t_,mode,seed)
-            mv_ = p_["shares"]*px_
+            mv_ = p_["shares"] * px_
             up_ = (px_-p_["avg_cost"])/p_["avg_cost"]*100 if p_["avg_cost"] > 0 else 0
             sec_= UNIVERSE[UNIVERSE["Ticker"]==t_]["Sector"]
             sec_= sec_.iloc[0] if len(sec_) else "Unknown"
             hm.append({"Ticker":t_,"Sector":sec_,"Market Value":mv_,"Return %":round(up_,2)})
         hm_df = pd.DataFrame(hm)
 
+        # Fix: build proper hierarchical labels so Plotly treemap renders correctly
+        hm_sectors  = hm_df["Sector"].unique().tolist()
+        hm_labels   = ["Portfolio"] + hm_sectors + hm_df["Ticker"].tolist()
+        hm_parents  = [""] + ["Portfolio"]*len(hm_sectors) + hm_df["Sector"].tolist()
+        hm_values   = [0] + [0]*len(hm_sectors) + hm_df["Market Value"].tolist()
+        hm_colors   = (
+            [0]
+            + [hm_df[hm_df["Sector"]==s]["Return %"].mean() for s in hm_sectors]
+            + hm_df["Return %"].tolist()
+        )
+        hm_custom = np.array(
+            [[0, 0]]
+            + [[hm_df[hm_df["Sector"]==s]["Return %"].mean(),
+                hm_df[hm_df["Sector"]==s]["Market Value"].sum()] for s in hm_sectors]
+            + [[row["Return %"], row["Market Value"]] for _,row in hm_df.iterrows()]
+        )
+
         fig_hm = go.Figure(go.Treemap(
-            labels=hm_df["Ticker"],
-            parents=hm_df["Sector"],
-            values=hm_df["Market Value"],
-            customdata=np.stack([hm_df["Return %"], hm_df["Market Value"]],axis=-1),
+            labels=hm_labels, parents=hm_parents, values=hm_values,
+            customdata=hm_custom,
             texttemplate="<b>%{label}</b><br>%{customdata[0]:+.2f}%",
             hovertemplate="<b>%{label}</b><br>Mkt Value: $%{customdata[1]:,.2f}<br>Return: %{customdata[0]:+.2f}%<extra></extra>",
             marker=dict(
-                colors=hm_df["Return %"],
+                colors=hm_colors,
                 colorscale=[[0,RH_RED],[0.5,"#1a1a1a"],[1,RH_GREEN]],
                 cmid=0, showscale=True,
                 colorbar=dict(
@@ -1506,7 +1540,8 @@ with tab6:
                     tickfont=dict(color="#888")
                 )
             ),
-            textfont=dict(color="#fff",size=14)
+            textfont=dict(color="#fff",size=14),
+            branchvalues="remainder"
         ))
         fig_hm.update_layout(
             paper_bgcolor="#111111", font=dict(color="#fff"),
@@ -1531,19 +1566,34 @@ with tab6:
                            "Change %":round(chg_,2)})
     univ_df = pd.DataFrame(univ_rows)
 
+    # Fix: build proper hierarchical labels
+    u_sectors = univ_df["Sector"].unique().tolist()
+    u_labels  = ["Universe"] + u_sectors + univ_df["Ticker"].tolist()
+    u_parents = [""] + ["Universe"]*len(u_sectors) + univ_df["Sector"].tolist()
+    u_values  = [0] + [0]*len(u_sectors) + univ_df["Price"].tolist()
+    u_colors  = (
+        [0]
+        + [univ_df[univ_df["Sector"]==s]["Change %"].mean() for s in u_sectors]
+        + univ_df["Change %"].tolist()
+    )
+    u_custom = np.array(
+        [[0]]
+        + [[univ_df[univ_df["Sector"]==s]["Change %"].mean()] for s in u_sectors]
+        + [[row["Change %"]] for _,row in univ_df.iterrows()]
+    )
+
     fig_u = go.Figure(go.Treemap(
-        labels=univ_df["Ticker"],
-        parents=univ_df["Sector"],
-        values=univ_df["Price"],
-        customdata=univ_df["Change %"],
-        texttemplate="<b>%{label}</b><br>%{customdata:+.2f}%",
-        hovertemplate="<b>%{label}</b><br>$%{value:,.2f}<br>Daily: %{customdata:+.2f}%<extra></extra>",
+        labels=u_labels, parents=u_parents, values=u_values,
+        customdata=u_custom,
+        texttemplate="<b>%{label}</b><br>%{customdata[0]:+.2f}%",
+        hovertemplate="<b>%{label}</b><br>$%{value:,.2f}<br>Daily: %{customdata[0]:+.2f}%<extra></extra>",
         marker=dict(
-            colors=univ_df["Change %"],
+            colors=u_colors,
             colorscale=[[0,RH_RED],[0.5,"#1a1a1a"],[1,RH_GREEN]],
             cmid=0, showscale=True,
         ),
-        textfont=dict(color="#fff",size=13)
+        textfont=dict(color="#fff",size=13),
+        branchvalues="remainder"
     ))
     fig_u.update_layout(
         paper_bgcolor="#111111", font=dict(color="#fff"),
@@ -1566,7 +1616,7 @@ if st.session_state.auto_refresh and mode == "Live (yfinance)":
 _inject_html("""
 <hr>
 <div style="text-align:center;color:#2a2a2a;font-size:11px;padding:16px 0;">
-    © 2026 Midas Capital Systems · Andrew Ignatius · Senior Capstone Project<br>
+    &copy; 2026 Midas Capital Systems &middot; Andrew Ignatius &middot; Senior Capstone Project<br>
     <span style="font-size:10px;">Simulated trading only. Not financial advice.</span>
 </div>
 """)
