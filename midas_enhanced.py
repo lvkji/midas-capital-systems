@@ -586,9 +586,16 @@ def show_auth_page():
         """)
 
         # Tab switcher via radio
+        # If registration just succeeded, default to "Sign In" by consuming the flag
+        # before the widget is instantiated (writing to a bound key after render crashes).
+        default_tab_index = 0
+        if st.session_state.pop("_switch_to_signin", False):
+            default_tab_index = 0   # Sign In is index 0
+
         auth_mode = st.radio(
             "", ["Sign In", "Create Account"],
             horizontal=True, key="auth_mode_radio",
+            index=default_tab_index,
             label_visibility="collapsed"
         )
 
@@ -660,7 +667,7 @@ def show_auth_page():
                     ok, msg = db_create_user(u, p, is_admin=is_first)
                     if ok:
                         st.success(msg + " Please sign in.")
-                        st.session_state.auth_mode_radio = "Sign In"
+                        st.session_state._switch_to_signin = True
                         st.rerun()
                     else:
                         st.error(msg)
