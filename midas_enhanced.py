@@ -1,16 +1,17 @@
 # ============================================================
-# MIDAS CAPITAL SYSTEMS v3.0
+# MIDAS CAPITAL SYSTEMS v4.0
 # AI-Powered Multi-User Paper Trading Platform
 # Author: Andrew Ignatius | Senior Capstone Project 2026
+# v4.0 additions: Cash Deposits · Dollar Cost Averaging · DB Hardening
 # ============================================================
 
-import os, time, sqlite3, random, hashlib, secrets
+import os, time, sqlite3, random, hashlib, secrets, shutil
 import numpy as np
 import pandas as pd
 import streamlit as st
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
-from datetime import datetime
+from datetime import datetime, timedelta
 from sklearn.ensemble import RandomForestRegressor
 from sklearn.preprocessing import StandardScaler
 import warnings
@@ -32,75 +33,645 @@ except Exception:
 # CONSTANTS
 # ============================================================
 
-DB_PATH = "midas_capital_v3.db"
+DB_PATH        = "midas_capital_v4.db"
+DB_BACKUP_DIR  = "midas_backups"   # auto-backup folder
 
 RH_GREEN  = "#00C805"
 RH_RED    = "#FF5000"
 RH_GOLD   = "#D4A017"
 ZIMA_BLUE = "#6FC3DF"
 
-UNIVERSE = pd.DataFrame([
-    ("AAPL",  "Apple",                "Technology"),
-    ("MSFT",  "Microsoft",            "Technology"),
-    ("NVDA",  "NVIDIA",               "Technology"),
-    ("GOOGL", "Alphabet",             "Communication Services"),
-    ("META",  "Meta",                 "Communication Services"),
-    ("AMZN",  "Amazon",               "Consumer Discretionary"),
-    ("TSLA",  "Tesla",                "Consumer Discretionary"),
-    ("HD",    "Home Depot",           "Consumer Discretionary"),
-    ("JPM",   "JPMorgan Chase",       "Financials"),
-    ("V",     "Visa",                 "Financials"),
-    ("BAC",   "Bank of America",      "Financials"),
-    ("XOM",   "Exxon Mobil",          "Energy"),
-    ("CVX",   "Chevron",              "Energy"),
-    ("LLY",   "Eli Lilly",            "Health Care"),
-    ("UNH",   "UnitedHealth",         "Health Care"),
-    ("JNJ",   "Johnson & Johnson",    "Health Care"),
-    ("KO",    "Coca-Cola",            "Consumer Staples"),
-    ("PEP",   "PepsiCo",              "Consumer Staples"),
-    ("WMT",   "Walmart",              "Consumer Staples"),
-    ("DIS",   "Disney",               "Communication Services"),
-    ("CAT",   "Caterpillar",          "Industrials"),
-    ("BA",    "Boeing",               "Industrials"),
-    ("SPY",   "SPDR S&P 500 ETF",    "ETF"),
-], columns=["Ticker", "Name", "Sector"])
+DCA_FREQUENCIES = {
+    "Daily":      1,
+    "Weekly":     7,
+    "Bi-Weekly":  14,
+    "Monthly":    30,
+}
 
+# ── Sector display name normalisation ────────────────────────
+_SECTOR_ALIAS = {
+    "Information Technology": "Technology",
+    "Telecommunication Services": "Communication Services",
+}
+
+def _norm_sector(s: str) -> str:
+    return _SECTOR_ALIAS.get(s, s) if isinstance(s, str) else "Unknown"
+
+# ── Colour palette (covers all 11 GICS sectors + ETF) ────────
 SECTOR_COLORS = {
     "Technology":             "#6366f1",
+    "Information Technology": "#6366f1",
     "Communication Services": "#06b6d4",
     "Consumer Discretionary": "#f59e0b",
-    "Financials":             "#10b981",
-    "Energy":                 "#f97316",
-    "Health Care":            "#ec4899",
     "Consumer Staples":       "#84cc16",
+    "Energy":                 "#f97316",
+    "Financials":             "#10b981",
+    "Health Care":            "#ec4899",
     "Industrials":            "#8b5cf6",
+    "Materials":              "#a78bfa",
+    "Real Estate":            "#34d399",
+    "Utilities":              "#60a5fa",
     "ETF":                    "#94a3b8",
     "Unknown":                "#475569",
 }
 
-# GBM parameters per sector (annualised drift μ and daily σ)
+# ── GBM simulation parameters per sector ─────────────────────
 SECTOR_SIM_PARAMS = {
     "Technology":             {"mu": 0.00080, "sigma": 0.0220, "skew": -0.15},
+    "Information Technology": {"mu": 0.00080, "sigma": 0.0220, "skew": -0.15},
     "Communication Services": {"mu": 0.00050, "sigma": 0.0175, "skew": -0.10},
     "Consumer Discretionary": {"mu": 0.00040, "sigma": 0.0195, "skew": -0.12},
-    "Financials":             {"mu": 0.00040, "sigma": 0.0160, "skew": -0.20},
-    "Energy":                 {"mu": 0.00030, "sigma": 0.0250, "skew": -0.08},
-    "Health Care":            {"mu": 0.00055, "sigma": 0.0145, "skew": -0.10},
     "Consumer Staples":       {"mu": 0.00025, "sigma": 0.0095, "skew": -0.05},
+    "Energy":                 {"mu": 0.00030, "sigma": 0.0250, "skew": -0.08},
+    "Financials":             {"mu": 0.00040, "sigma": 0.0160, "skew": -0.20},
+    "Health Care":            {"mu": 0.00055, "sigma": 0.0145, "skew": -0.10},
     "Industrials":            {"mu": 0.00040, "sigma": 0.0160, "skew": -0.12},
+    "Materials":              {"mu": 0.00030, "sigma": 0.0190, "skew": -0.10},
+    "Real Estate":            {"mu": 0.00025, "sigma": 0.0130, "skew": -0.08},
+    "Utilities":              {"mu": 0.00020, "sigma": 0.0090, "skew": -0.05},
     "ETF":                    {"mu": 0.00042, "sigma": 0.0115, "skew": -0.10},
     "Unknown":                {"mu": 0.00035, "sigma": 0.0180, "skew": -0.10},
 }
 
-# Anchor prices (approximate real-world levels for visual realism)
+# ── Anchor prices for simulation realism ─────────────────────
 ANCHOR_PRICES = {
-    "AAPL": 195, "MSFT": 420, "NVDA": 880, "GOOGL": 172, "META": 525,
-    "AMZN": 198, "TSLA": 172, "HD":   370, "JPM":  208, "V":    288,
-    "BAC":   40, "XOM":  112, "CVX":  158, "LLY":  830, "UNH":  495,
-    "JNJ":  150, "KO":    63, "PEP":  172, "WMT":   70, "DIS":   97,
-    "CAT":  355, "BA":   178, "SPY":  535,
+    "NVDA":252,"AAPL":252,"GOOGL":172,"GOOG":170,"MSFT":383,"AMZN":211,
+    "AVGO":325,"META":607,"TSLA":382,"PLTR":161,"AMD":205,"INTC":44,
+    "ORCL":154,"QCOM":129,"TXN":190,"AMAT":365,"LRCX":236,"KLAC":531,
+    "ANET":136,"SNPS":437,"CDNS":295,"ADBE":248,"CRM":196,"NOW":785,
+    "INTU":458,"PANW":165,"CRWD":416,"FTNT":83,"NXPI":196,"MCHP":65,
+    "ADI":314,"TER":307,"MPWR":1086,"KEYS":292,"MSI":459,"GLW":132,
+    "CIEN":410,"IBM":249,"HPE":22,"CTSH":62,"DELL":163,"APP":462,
+    "GOOGL":172,"META":607,"DIS":99,"NFLX":942,"TMUS":209,"VZ":51,
+    "T":29,"CMCSA":29,"CHTR":217,"WBD":27,"FOXA":58,"LYV":153,
+    "JPM":292,"BAC":48,"WFC":79,"GS":840,"MS":166,"C":112,"AXP":304,
+    "BLK":987,"SCHW":96,"USB":52,"PNC":205,"BK":117,"TFC":45,"COF":186,
+    "AIG":75,"MET":70,"PRU":95,"AFL":107,"ALL":208,"TRV":297,"CB":328,
+    "PGR":206,"HIG":136,"CINF":161,"WRB":66,"ACGL":94,"STT":124,
+    "BX":111,"KKR":92,"APO":112,"RJF":146,"AMP":448,"FITB":45,
+    "MTB":202,"HBAN":15,"CFG":58,"USB":52,"NTRS":138,"IBKR":68,
+    "NDAQ":87,"ICE":158,"CBOE":283,"CME":307,"SPGI":432,"MCO":445,
+    "MSCI":558,"VRSK":202,
+    "LLY":914,"UNH":271,"JNJ":236,"MRK":116,"ABBV":205,"TMO":482,
+    "ABT":105,"DHR":191,"SYK":334,"ISRG":481,"VRTX":452,"REGN":738,
+    "MDT":87,"BMY":57,"GILD":137,"AMGN":352,"PFE":27,"BSX":70,
+    "BDX":156,"ZTS":116,"EW":82,"IDXX":583,"RMD":229,"DXCM":67,
+    "GEHC":72,"HCA":500,"IQV":169,"BIIB":184,"WAT":304,"A":113,
+    "MTD":1244,"VRTX":452,
+    "AMZN":211,"TSLA":382,"HD":333,"MCD":310,"NKE":53,"LOW":236,
+    "BKNG":4433,"TJX":157,"SBUX":94,"CMG":34,"TGT":115,"ROST":214,
+    "MAR":330,"HLT":304,"ABNB":133,"GM":76,"F":12,"ORLY":2840,
+    "AZO":3375,"DHI":140,"LVS":54,"RCL":277,"CCL":25,"DAL":66,
+    "UAL":94,"YUM":159,"EBAY":90,"EXPE":239,"TTWO":202,"CVNA":302,
+    "DASH":161,"HOOD":73,
+    "WMT":121,"KO":75,"PEP":151,"PG":144,"PM":164,"MO":65,"MDLZ":57,
+    "CL":85,"KMB":100,"SYY":82,"KR":72,"ADM":68,"CTVA":78,"KHC":21,
+    "KDP":27,"MNST":74,"KVUE":18,"TSN":55,"HRL":30,"CAG":24,
+    "CPB":31,"GIS":60,"SJM":100,"MKC":79,
+    "XOM":161,"CVX":204,"COP":128,"OXY":60,"EOG":140,"SLB":49,
+    "BKR":63,"HAL":37,"MPC":235,"PSX":178,"VLO":238,"KMI":34,
+    "WMB":74,"OKE":90,"TRGP":241,"DVN":49,"FANG":193,"EQT":66,
+    "CTRA":34,"EXE":108,
+    "CAT":703,"BA":200,"RTX":198,"HON":225,"UNP":240,"GE":295,
+    "GEV":889,"DE":570,"LMT":623,"GD":350,"NOC":692,"LHX":352,
+    "ETN":364,"PH":918,"ITW":265,"EMR":131,"ROK":361,"DOV":214,
+    "AME":215,"WAB":243,"PCAR":115,"CMI":550,"URI":743,"FDX":361,
+    "UPS":98,"WM":229,"RSG":219,"NSC":287,"CSX":39,"ODFL":191,
+    "FAST":45,"CTAS":183,"GWW":1062,"PWR":572,"TT":428,"JCI":134,
+    "HWM":239,"TDG":1164,"AXON":513,"DAL":66,"IR":83,"XYL":121,
+    "OTIS":80,"CARR":59,"EME":752,"WAB":243,
+    "LIN":480,"APD":279,"ECL":263,"SHW":316,"NEM":99,"FCX":55,
+    "NUE":162,"STLD":168,"DOW":36,"DD":71,"PPG":102,"IFF":83,
+    "ALB":73,"CF":85,"MOS":23,"MLM":580,"VMC":265,"CRH":105,
+    "PKG":195,"IP":42,
+    "PLD":132,"AMT":176,"EQIX":967,"WELL":197,"SPG":185,"O":61,
+    "DLR":177,"PSA":274,"CCI":81,"EXR":133,"VICI":27,"VTR":83,
+    "EQR":63,"AVB":202,"ESS":263,"ARE":96,"BXP":64,"UDR":37,
+    "CPT":110,"IRM":103,"SBAC":186,"AMH":35,
+    "NEE":91,"SO":94,"DUK":128,"SRE":94,"AEP":128,"EXC":47,
+    "XEL":77,"D":60,"ED":110,"EIX":71,"ETR":102,"FE":49,
+    "DTE":143,"PPL":37,"WEC":113,"AEE":108,"CMS":62,"NRG":153,
+    "CEG":293,"VST":153,"AWK":136,"ATO":182,"CNP":42,"ES":68,
+    "PEG":80,
+    "SPY":535,"QQQ":450,"IWM":200,"DIA":380,
 }
 
+# ── S&P 500 universe loader ───────────────────────────────────
+_SP500_FALLBACK = [
+    ("A","Agilent Technologies","Health Care"),
+    ("AAL","American Airlines Group","Industrials"),
+    ("AAPL","Apple","Technology"),
+    ("ABBV","AbbVie","Health Care"),
+    ("ABNB","Airbnb","Consumer Discretionary"),
+    ("ABT","Abbott Laboratories","Health Care"),
+    ("ACGL","Arch Capital Group","Financials"),
+    ("ACN","Accenture","Technology"),
+    ("ADBE","Adobe","Technology"),
+    ("ADI","Analog Devices","Technology"),
+    ("ADM","Archer-Daniels-Midland","Consumer Staples"),
+    ("ADP","Automatic Data Processing","Technology"),
+    ("ADSK","Autodesk","Technology"),
+    ("AEE","Ameren","Utilities"),
+    ("AEP","American Electric Power","Utilities"),
+    ("AES","AES Corporation","Utilities"),
+    ("AFL","Aflac","Financials"),
+    ("AIG","American International Group","Financials"),
+    ("AJG","Arthur J. Gallagher","Financials"),
+    ("AKAM","Akamai Technologies","Technology"),
+    ("ALB","Albemarle","Materials"),
+    ("ALL","Allstate","Financials"),
+    ("ALLE","Allegion","Industrials"),
+    ("AMAT","Applied Materials","Technology"),
+    ("AMCR","Amcor","Materials"),
+    ("AMD","Advanced Micro Devices","Technology"),
+    ("AME","AMETEK","Industrials"),
+    ("AMGN","Amgen","Health Care"),
+    ("AMP","Ameriprise Financial","Financials"),
+    ("AMT","American Tower","Real Estate"),
+    ("AMZN","Amazon","Consumer Discretionary"),
+    ("ANET","Arista Networks","Technology"),
+    ("ANF","Abercrombie & Fitch","Consumer Discretionary"),
+    ("AON","Aon","Financials"),
+    ("AOS","A. O. Smith","Industrials"),
+    ("APD","Air Products and Chemicals","Materials"),
+    ("APH","Amphenol","Technology"),
+    ("APO","Apollo Global Management","Financials"),
+    ("APP","AppLovin","Technology"),
+    ("ARES","Ares Management","Financials"),
+    ("ARE","Alexandria Real Estate Equities","Real Estate"),
+    ("ATO","Atmos Energy","Utilities"),
+    ("AVB","AvalonBay Communities","Real Estate"),
+    ("AVGO","Broadcom","Technology"),
+    ("AVY","Avery Dennison","Materials"),
+    ("AWK","American Water Works","Utilities"),
+    ("AXON","Axon Enterprise","Industrials"),
+    ("AXP","American Express","Financials"),
+    ("AZO","AutoZone","Consumer Discretionary"),
+    ("BA","Boeing","Industrials"),
+    ("BAC","Bank of America","Financials"),
+    ("BALL","Ball Corporation","Materials"),
+    ("BAX","Baxter International","Health Care"),
+    ("BBWI","Bath & Body Works","Consumer Discretionary"),
+    ("BBY","Best Buy","Consumer Discretionary"),
+    ("BDX","Becton Dickinson","Health Care"),
+    ("BEN","Franklin Resources","Financials"),
+    ("BG","Bunge Global","Consumer Staples"),
+    ("BIIB","Biogen","Health Care"),
+    ("BK","Bank of New York Mellon","Financials"),
+    ("BKNG","Booking Holdings","Consumer Discretionary"),
+    ("BKR","Baker Hughes","Energy"),
+    ("BLK","BlackRock","Financials"),
+    ("BMY","Bristol-Myers Squibb","Health Care"),
+    ("BR","Broadridge Financial","Technology"),
+    ("BRK.B","Berkshire Hathaway","Financials"),
+    ("BSX","Boston Scientific","Health Care"),
+    ("BWA","BorgWarner","Consumer Discretionary"),
+    ("BX","Blackstone","Financials"),
+    ("BXP","BXP Inc.","Real Estate"),
+    ("C","Citigroup","Financials"),
+    ("CAG","Conagra Brands","Consumer Staples"),
+    ("CAH","Cardinal Health","Health Care"),
+    ("CARR","Carrier Global","Industrials"),
+    ("CAT","Caterpillar","Industrials"),
+    ("CB","Chubb","Financials"),
+    ("CBOE","Cboe Global Markets","Financials"),
+    ("CBRE","CBRE Group","Real Estate"),
+    ("CCL","Carnival","Consumer Discretionary"),
+    ("CDNS","Cadence Design Systems","Technology"),
+    ("CDW","CDW Corporation","Technology"),
+    ("CE","Celanese","Materials"),
+    ("CEG","Constellation Energy","Utilities"),
+    ("CF","CF Industries","Materials"),
+    ("CFG","Citizens Financial Group","Financials"),
+    ("CHD","Church & Dwight","Consumer Staples"),
+    ("CHTR","Charter Communications","Communication Services"),
+    ("CI","Cigna","Health Care"),
+    ("CIEN","Ciena","Technology"),
+    ("CINF","Cincinnati Financial","Financials"),
+    ("CL","Colgate-Palmolive","Consumer Staples"),
+    ("CLX","Clorox","Consumer Staples"),
+    ("CMA","Comerica","Financials"),
+    ("CME","CME Group","Financials"),
+    ("CMG","Chipotle Mexican Grill","Consumer Discretionary"),
+    ("CMI","Cummins","Industrials"),
+    ("CMS","CMS Energy","Utilities"),
+    ("CNC","Centene","Health Care"),
+    ("CNP","CenterPoint Energy","Utilities"),
+    ("COF","Capital One Financial","Financials"),
+    ("COIN","Coinbase Global","Financials"),
+    ("COR","Cencora","Health Care"),
+    ("COP","ConocoPhillips","Energy"),
+    ("COST","Costco Wholesale","Consumer Staples"),
+    ("CPAY","Corpay","Financials"),
+    ("CPB","Campbell Soup","Consumer Staples"),
+    ("CPRT","Copart","Industrials"),
+    ("CPT","Camden Property Trust","Real Estate"),
+    ("CRH","CRH plc","Materials"),
+    ("CRM","Salesforce","Technology"),
+    ("CRWD","CrowdStrike Holdings","Technology"),
+    ("CSCO","Cisco Systems","Technology"),
+    ("CSGP","CoStar Group","Real Estate"),
+    ("CSX","CSX","Industrials"),
+    ("CTAS","Cintas","Industrials"),
+    ("CTRA","Coterra Energy","Energy"),
+    ("CTSH","Cognizant Technology Solutions","Technology"),
+    ("CTVA","Corteva","Materials"),
+    ("CVS","CVS Health","Health Care"),
+    ("CVX","Chevron","Energy"),
+    ("CVNA","Carvana","Consumer Discretionary"),
+    ("D","Dominion Energy","Utilities"),
+    ("DAL","Delta Air Lines","Industrials"),
+    ("DASH","DoorDash","Consumer Discretionary"),
+    ("DD","DuPont de Nemours","Materials"),
+    ("DE","Deere & Company","Industrials"),
+    ("DECK","Deckers Outdoor","Consumer Discretionary"),
+    ("DELL","Dell Technologies","Technology"),
+    ("DFS","Discover Financial Services","Financials"),
+    ("DG","Dollar General","Consumer Discretionary"),
+    ("DGX","Quest Diagnostics","Health Care"),
+    ("DHI","D.R. Horton","Consumer Discretionary"),
+    ("DHR","Danaher","Health Care"),
+    ("DIS","Walt Disney","Communication Services"),
+    ("DLR","Digital Realty Trust","Real Estate"),
+    ("DOC","Physicians Realty Trust","Real Estate"),
+    ("DOV","Dover","Industrials"),
+    ("DOW","Dow","Materials"),
+    ("DPZ","Domino's Pizza","Consumer Discretionary"),
+    ("DRI","Darden Restaurants","Consumer Discretionary"),
+    ("DTE","DTE Energy","Utilities"),
+    ("DUK","Duke Energy","Utilities"),
+    ("DVA","DaVita","Health Care"),
+    ("DVN","Devon Energy","Energy"),
+    ("DXCM","DexCom","Health Care"),
+    ("EA","Electronic Arts","Communication Services"),
+    ("EBAY","eBay","Consumer Discretionary"),
+    ("ECL","Ecolab","Materials"),
+    ("ED","Consolidated Edison","Utilities"),
+    ("EG","Everest Group","Financials"),
+    ("EIX","Edison International","Utilities"),
+    ("EL","Estée Lauder","Consumer Staples"),
+    ("ELV","Elevance Health","Health Care"),
+    ("EME","EMCOR Group","Industrials"),
+    ("EMR","Emerson Electric","Industrials"),
+    ("ENPH","Enphase Energy","Technology"),
+    ("EOG","EOG Resources","Energy"),
+    ("EQIX","Equinix","Real Estate"),
+    ("EQR","Equity Residential","Real Estate"),
+    ("EQT","EQT","Energy"),
+    ("ES","Eversource Energy","Utilities"),
+    ("ESS","Essex Property Trust","Real Estate"),
+    ("ETN","Eaton","Industrials"),
+    ("ETR","Entergy","Utilities"),
+    ("EVRG","Evergy","Utilities"),
+    ("EW","Edwards Lifesciences","Health Care"),
+    ("EXC","Exelon","Utilities"),
+    ("EXE","Expand Energy","Energy"),
+    ("EXPE","Expedia Group","Consumer Discretionary"),
+    ("EXR","Extra Space Storage","Real Estate"),
+    ("F","Ford Motor","Consumer Discretionary"),
+    ("FANG","Diamondback Energy","Energy"),
+    ("FAST","Fastenal","Industrials"),
+    ("FCX","Freeport-McMoRan","Materials"),
+    ("FDS","FactSet Research Systems","Financials"),
+    ("FDX","FedEx","Industrials"),
+    ("FE","FirstEnergy","Utilities"),
+    ("FICO","Fair Isaac","Technology"),
+    ("FIS","Fidelity National Information Services","Technology"),
+    ("FISV","Fiserv","Technology"),
+    ("FITB","Fifth Third Bancorp","Financials"),
+    ("FIX","Comfort Systems USA","Industrials"),
+    ("FOX","Fox Corporation","Communication Services"),
+    ("FOXA","Fox Corporation","Communication Services"),
+    ("FRT","Federal Realty Investment Trust","Real Estate"),
+    ("FTNT","Fortinet","Technology"),
+    ("GD","General Dynamics","Industrials"),
+    ("GDDY","GoDaddy","Technology"),
+    ("GE","GE Aerospace","Industrials"),
+    ("GEHC","GE HealthCare Technologies","Health Care"),
+    ("GEN","Gen Digital","Technology"),
+    ("GEV","GE Vernova","Industrials"),
+    ("GILD","Gilead Sciences","Health Care"),
+    ("GIS","General Mills","Consumer Staples"),
+    ("GL","Globe Life","Financials"),
+    ("GLW","Corning","Technology"),
+    ("GM","General Motors","Consumer Discretionary"),
+    ("GNRC","Generac Holdings","Industrials"),
+    ("GOOG","Alphabet Class C","Communication Services"),
+    ("GOOGL","Alphabet Class A","Communication Services"),
+    ("GPC","Genuine Parts","Consumer Discretionary"),
+    ("GPN","Global Payments","Technology"),
+    ("GRMN","Garmin","Technology"),
+    ("GS","Goldman Sachs","Financials"),
+    ("GWW","W.W. Grainger","Industrials"),
+    ("HAL","Halliburton","Energy"),
+    ("HAS","Hasbro","Consumer Discretionary"),
+    ("HBAN","Huntington Bancshares","Financials"),
+    ("HCA","HCA Healthcare","Health Care"),
+    ("HD","Home Depot","Consumer Discretionary"),
+    ("HES","Hess","Energy"),
+    ("HIG","Hartford Financial Services","Financials"),
+    ("HII","Huntington Ingalls Industries","Industrials"),
+    ("HLT","Hilton Worldwide Holdings","Consumer Discretionary"),
+    ("HOLX","Hologic","Health Care"),
+    ("HON","Honeywell International","Industrials"),
+    ("HOOD","Robinhood Markets","Financials"),
+    ("HPE","Hewlett Packard Enterprise","Technology"),
+    ("HPQ","HP Inc.","Technology"),
+    ("HRL","Hormel Foods","Consumer Staples"),
+    ("HSIC","Henry Schein","Health Care"),
+    ("HST","Host Hotels & Resorts","Real Estate"),
+    ("HSY","Hershey","Consumer Staples"),
+    ("HUBB","Hubbell","Industrials"),
+    ("HUM","Humana","Health Care"),
+    ("HWM","Howmet Aerospace","Industrials"),
+    ("IBM","IBM","Technology"),
+    ("ICE","Intercontinental Exchange","Financials"),
+    ("IDXX","IDEXX Laboratories","Health Care"),
+    ("IEX","IDEX Corporation","Industrials"),
+    ("IFF","International Flavors & Fragrances","Materials"),
+    ("INCY","Incyte","Health Care"),
+    ("INTC","Intel","Technology"),
+    ("INTU","Intuit","Technology"),
+    ("INVH","Invitation Homes","Real Estate"),
+    ("IP","International Paper","Materials"),
+    ("IPG","Interpublic Group","Communication Services"),
+    ("IQV","IQVIA Holdings","Health Care"),
+    ("IR","Ingersoll Rand","Industrials"),
+    ("IRM","Iron Mountain","Real Estate"),
+    ("ISRG","Intuitive Surgical","Health Care"),
+    ("IT","Gartner","Technology"),
+    ("ITW","Illinois Tool Works","Industrials"),
+    ("IVZ","Invesco","Financials"),
+    ("J","Jacobs Solutions","Industrials"),
+    ("JBHT","J.B. Hunt Transport Services","Industrials"),
+    ("JBL","Jabil","Technology"),
+    ("JCI","Johnson Controls International","Industrials"),
+    ("JKHY","Jack Henry & Associates","Technology"),
+    ("JNJ","Johnson & Johnson","Health Care"),
+    ("JNPR","Juniper Networks","Technology"),
+    ("JPM","JPMorgan Chase","Financials"),
+    ("K","Kellanova","Consumer Staples"),
+    ("KDP","Keurig Dr Pepper","Consumer Staples"),
+    ("KEY","KeyCorp","Financials"),
+    ("KEYS","Keysight Technologies","Technology"),
+    ("KHC","Kraft Heinz","Consumer Staples"),
+    ("KIM","Kimco Realty","Real Estate"),
+    ("KLAC","KLA Corporation","Technology"),
+    ("KKR","KKR & Co.","Financials"),
+    ("KMB","Kimberly-Clark","Consumer Staples"),
+    ("KMI","Kinder Morgan","Energy"),
+    ("KO","Coca-Cola","Consumer Staples"),
+    ("KR","Kroger","Consumer Staples"),
+    ("KVUE","Kenvue","Consumer Staples"),
+    ("L","Loews","Financials"),
+    ("LEN","Lennar","Consumer Discretionary"),
+    ("LH","Labcorp","Health Care"),
+    ("LHX","L3Harris Technologies","Industrials"),
+    ("LIN","Linde","Materials"),
+    ("LKQ","LKQ Corporation","Consumer Discretionary"),
+    ("LLY","Eli Lilly","Health Care"),
+    ("LMT","Lockheed Martin","Industrials"),
+    ("LOW","Lowe's Companies","Consumer Discretionary"),
+    ("LRCX","Lam Research","Technology"),
+    ("LULU","Lululemon Athletica","Consumer Discretionary"),
+    ("LUV","Southwest Airlines","Industrials"),
+    ("LVS","Las Vegas Sands","Consumer Discretionary"),
+    ("LYB","LyondellBasell Industries","Materials"),
+    ("LYV","Live Nation Entertainment","Communication Services"),
+    ("MA","Mastercard","Financials"),
+    ("MAA","Mid-America Apartment Communities","Real Estate"),
+    ("MAR","Marriott International","Consumer Discretionary"),
+    ("MAS","Masco","Industrials"),
+    ("MCD","McDonald's","Consumer Discretionary"),
+    ("MCHP","Microchip Technology","Technology"),
+    ("MCK","McKesson","Health Care"),
+    ("MCO","Moody's","Financials"),
+    ("MDLZ","Mondelez International","Consumer Staples"),
+    ("MDT","Medtronic","Health Care"),
+    ("MET","MetLife","Financials"),
+    ("META","Meta Platforms","Communication Services"),
+    ("MHK","Mohawk Industries","Consumer Discretionary"),
+    ("MKC","McCormick","Consumer Staples"),
+    ("MLM","Martin Marietta Materials","Materials"),
+    ("MMC","Marsh & McLennan","Financials"),
+    ("MMM","3M","Industrials"),
+    ("MNST","Monster Beverage","Consumer Staples"),
+    ("MO","Altria Group","Consumer Staples"),
+    ("MOH","Molina Healthcare","Health Care"),
+    ("MPC","Marathon Petroleum","Energy"),
+    ("MPWR","Monolithic Power Systems","Technology"),
+    ("MRK","Merck","Health Care"),
+    ("MS","Morgan Stanley","Financials"),
+    ("MSCI","MSCI Inc.","Financials"),
+    ("MSFT","Microsoft","Technology"),
+    ("MSI","Motorola Solutions","Technology"),
+    ("MTB","M&T Bank","Financials"),
+    ("MTCH","Match Group","Communication Services"),
+    ("MTD","Mettler-Toledo International","Health Care"),
+    ("MU","Micron Technology","Technology"),
+    ("NDAQ","Nasdaq","Financials"),
+    ("NEM","Newmont","Materials"),
+    ("NEE","NextEra Energy","Utilities"),
+    ("NFLX","Netflix","Communication Services"),
+    ("NI","NiSource","Utilities"),
+    ("NKE","Nike","Consumer Discretionary"),
+    ("NOC","Northrop Grumman","Industrials"),
+    ("NOW","ServiceNow","Technology"),
+    ("NRG","NRG Energy","Utilities"),
+    ("NSC","Norfolk Southern","Industrials"),
+    ("NTAP","NetApp","Technology"),
+    ("NTRS","Northern Trust","Financials"),
+    ("NUE","Nucor","Materials"),
+    ("NVDA","NVIDIA","Technology"),
+    ("NVR","NVR Inc.","Consumer Discretionary"),
+    ("NWSA","News Corp","Communication Services"),
+    ("NWS","News Corp","Communication Services"),
+    ("NXPI","NXP Semiconductors","Technology"),
+    ("O","Realty Income","Real Estate"),
+    ("ODFL","Old Dominion Freight Line","Industrials"),
+    ("OKE","ONEOK","Energy"),
+    ("OMC","Omnicom Group","Communication Services"),
+    ("ON","ON Semiconductor","Technology"),
+    ("ORCL","Oracle","Technology"),
+    ("ORLY","O'Reilly Automotive","Consumer Discretionary"),
+    ("OTIS","Otis Worldwide","Industrials"),
+    ("OXY","Occidental Petroleum","Energy"),
+    ("PAYC","Paycom Software","Technology"),
+    ("PAYX","Paychex","Technology"),
+    ("PCAR","PACCAR","Industrials"),
+    ("PCG","PG&E","Utilities"),
+    ("PEAK","Healthpeak Properties","Real Estate"),
+    ("PEG","Public Service Enterprise Group","Utilities"),
+    ("PEP","PepsiCo","Consumer Staples"),
+    ("PFE","Pfizer","Health Care"),
+    ("PG","Procter & Gamble","Consumer Staples"),
+    ("PGR","Progressive","Financials"),
+    ("PH","Parker-Hannifin","Industrials"),
+    ("PKG","Packaging Corp of America","Materials"),
+    ("PLD","Prologis","Real Estate"),
+    ("PLTR","Palantir Technologies","Technology"),
+    ("PM","Philip Morris International","Consumer Staples"),
+    ("PNC","PNC Financial Services","Financials"),
+    ("PODD","Insulet","Health Care"),
+    ("PPG","PPG Industries","Materials"),
+    ("PPL","PPL Corporation","Utilities"),
+    ("PRU","Prudential Financial","Financials"),
+    ("PSA","Public Storage","Real Estate"),
+    ("PSX","Phillips 66","Energy"),
+    ("PTC","PTC Inc.","Technology"),
+    ("PWR","Quanta Services","Industrials"),
+    ("PYPL","PayPal Holdings","Financials"),
+    ("QCOM","QUALCOMM","Technology"),
+    ("RCL","Royal Caribbean Cruises","Consumer Discretionary"),
+    ("REG","Regency Centers","Real Estate"),
+    ("REGN","Regeneron Pharmaceuticals","Health Care"),
+    ("RF","Regions Financial","Financials"),
+    ("RJF","Raymond James Financial","Financials"),
+    ("RL","Ralph Lauren","Consumer Discretionary"),
+    ("RMD","ResMed","Health Care"),
+    ("ROK","Rockwell Automation","Industrials"),
+    ("ROL","Rollins","Industrials"),
+    ("ROP","Roper Technologies","Industrials"),
+    ("ROST","Ross Stores","Consumer Discretionary"),
+    ("RSG","Republic Services","Industrials"),
+    ("RTX","RTX Corporation","Industrials"),
+    ("SBAC","SBA Communications","Real Estate"),
+    ("SBUX","Starbucks","Consumer Discretionary"),
+    ("SCHW","Charles Schwab","Financials"),
+    ("SHW","Sherwin-Williams","Materials"),
+    ("SJM","J.M. Smucker","Consumer Staples"),
+    ("SLB","SLB","Energy"),
+    ("SMCI","Super Micro Computer","Technology"),
+    ("SNA","Snap-on","Industrials"),
+    ("SNPS","Synopsys","Technology"),
+    ("SO","Southern Company","Utilities"),
+    ("SOLV","Solventum","Health Care"),
+    ("SPG","Simon Property Group","Real Estate"),
+    ("SPGI","S&P Global","Financials"),
+    ("SPY","SPDR S&P 500 ETF","ETF"),
+    ("SRE","Sempra","Utilities"),
+    ("STE","STERIS","Health Care"),
+    ("STLD","Steel Dynamics","Materials"),
+    ("STT","State Street","Financials"),
+    ("STX","Seagate Technology","Technology"),
+    ("STZ","Constellation Brands","Consumer Staples"),
+    ("SWK","Stanley Black & Decker","Industrials"),
+    ("SWKS","Skyworks Solutions","Technology"),
+    ("SYF","Synchrony Financial","Financials"),
+    ("SYK","Stryker","Health Care"),
+    ("SYY","Sysco","Consumer Staples"),
+    ("T","AT&T","Communication Services"),
+    ("TAP","Molson Coors Beverage","Consumer Staples"),
+    ("TDG","TransDigm Group","Industrials"),
+    ("TDY","Teledyne Technologies","Industrials"),
+    ("TEL","TE Connectivity","Technology"),
+    ("TER","Teradyne","Technology"),
+    ("TFC","Truist Financial","Financials"),
+    ("TGT","Target","Consumer Discretionary"),
+    ("TJX","TJX Companies","Consumer Discretionary"),
+    ("TMO","Thermo Fisher Scientific","Health Care"),
+    ("TMUS","T-Mobile US","Communication Services"),
+    ("TPL","Texas Pacific Land","Energy"),
+    ("TPR","Tapestry","Consumer Discretionary"),
+    ("TRGP","Targa Resources","Energy"),
+    ("TRV","Travelers Companies","Financials"),
+    ("TSCO","Tractor Supply","Consumer Discretionary"),
+    ("TSLA","Tesla","Consumer Discretionary"),
+    ("TSN","Tyson Foods","Consumer Staples"),
+    ("TT","Trane Technologies","Industrials"),
+    ("TTWO","Take-Two Interactive","Communication Services"),
+    ("TXN","Texas Instruments","Technology"),
+    ("TYL","Tyler Technologies","Technology"),
+    ("UAL","United Airlines Holdings","Industrials"),
+    ("UBER","Uber Technologies","Industrials"),
+    ("UDR","UDR Inc.","Real Estate"),
+    ("UHS","Universal Health Services","Health Care"),
+    ("ULTA","Ulta Beauty","Consumer Discretionary"),
+    ("UNH","UnitedHealth Group","Health Care"),
+    ("UNP","Union Pacific","Industrials"),
+    ("UPS","United Parcel Service","Industrials"),
+    ("URI","United Rentals","Industrials"),
+    ("USB","U.S. Bancorp","Financials"),
+    ("V","Visa","Financials"),
+    ("VFC","VF Corporation","Consumer Discretionary"),
+    ("VICI","VICI Properties","Real Estate"),
+    ("VLO","Valero Energy","Energy"),
+    ("VLTO","Veralto","Industrials"),
+    ("VMC","Vulcan Materials","Materials"),
+    ("VRSK","Verisk Analytics","Industrials"),
+    ("VRTX","Vertex Pharmaceuticals","Health Care"),
+    ("VST","Vistra","Utilities"),
+    ("VTR","Ventas","Real Estate"),
+    ("VTRS","Viatris","Health Care"),
+    ("VZ","Verizon Communications","Communication Services"),
+    ("WAB","Westinghouse Air Brake Technologies","Industrials"),
+    ("WAT","Waters","Health Care"),
+    ("WBD","Warner Bros. Discovery","Communication Services"),
+    ("WDC","Western Digital","Technology"),
+    ("WEC","WEC Energy Group","Utilities"),
+    ("WELL","Welltower","Real Estate"),
+    ("WFC","Wells Fargo","Financials"),
+    ("WM","Waste Management","Industrials"),
+    ("WMB","Williams Companies","Energy"),
+    ("WMT","Walmart","Consumer Staples"),
+    ("WRB","W. R. Berkley","Financials"),
+    ("WST","West Pharmaceutical Services","Health Care"),
+    ("WTW","Willis Towers Watson","Financials"),
+    ("WY","Weyerhaeuser","Real Estate"),
+    ("XEL","Xcel Energy","Utilities"),
+    ("XOM","Exxon Mobil","Energy"),
+    ("XYL","Xylem","Industrials"),
+    ("YUM","Yum! Brands","Consumer Discretionary"),
+    ("ZBH","Zimmer Biomet Holdings","Health Care"),
+    ("ZBRA","Zebra Technologies","Technology"),
+    ("ZTS","Zoetis","Health Care"),
+    ("DDOG","Datadog","Technology"),
+    ("WDAY","Workday","Technology"),
+    ("PANW","Palo Alto Networks","Technology"),
+]
+
+def _build_fallback_universe() -> pd.DataFrame:
+    df = pd.DataFrame(_SP500_FALLBACK, columns=["Ticker", "Name", "Sector"])
+    df["Sector"] = df["Sector"].apply(_norm_sector)
+    return df.drop_duplicates(subset="Ticker").reset_index(drop=True)
+
+@st.cache_data(show_spinner=False, ttl=86400)
+def _fetch_sp500_live() -> pd.DataFrame:
+    try:
+        tables = pd.read_html(
+            "https://en.wikipedia.org/wiki/List_of_S%26P_500_companies",
+            attrs={"id": "constituents"},
+        )
+        raw = tables[0]
+        col_map = {}
+        for c in raw.columns:
+            lc = c.lower()
+            if "symbol" in lc or "ticker" in lc:
+                col_map[c] = "Ticker"
+            elif "security" in lc or "company" in lc or "name" in lc:
+                col_map[c] = "Name"
+            elif "sector" in lc or "gics" in lc:
+                if "Sector" not in col_map.values():
+                    col_map[c] = "Sector"
+        raw = raw.rename(columns=col_map)
+        needed = [c for c in ["Ticker", "Name", "Sector"] if c in raw.columns]
+        if len(needed) < 2:
+            raise ValueError("Unexpected Wikipedia table structure")
+        df = raw[needed].copy()
+        df["Ticker"] = df["Ticker"].str.replace(".", "-", regex=False)
+        if "Sector" in df.columns:
+            df["Sector"] = df["Sector"].apply(_norm_sector)
+        else:
+            df["Sector"] = "Unknown"
+        if "Name" not in df.columns:
+            df["Name"] = df["Ticker"]
+        spy_row = pd.DataFrame([{"Ticker": "SPY", "Name": "SPDR S&P 500 ETF", "Sector": "ETF"}])
+        df = pd.concat([df, spy_row], ignore_index=True)
+        return df.drop_duplicates(subset="Ticker").reset_index(drop=True)
+    except Exception:
+        return _build_fallback_universe()
+
+UNIVERSE    = _fetch_sp500_live()
 ALL_TICKERS = sorted(UNIVERSE["Ticker"].tolist())
 
 STOIC_QUOTES = [
@@ -142,13 +713,27 @@ def verify_password(password: str, stored_hash: str, salt: str) -> bool:
     return _hash_pw(password, salt) == stored_hash
 
 # ============================================================
-# DATABASE LAYER  (v3 — user-scoped)
+# DATABASE LAYER  (v4 — deposits + DCA + hardened)
 # ============================================================
 
 def get_db():
-    return sqlite3.connect(DB_PATH, check_same_thread=False)
+    """
+    Returns a SQLite connection with WAL mode enabled.
+    WAL (Write-Ahead Logging) prevents DB corruption if the process
+    is killed mid-write, and allows concurrent reads while writing.
+    """
+    con = sqlite3.connect(DB_PATH, check_same_thread=False, timeout=30)
+    con.execute("PRAGMA journal_mode=WAL")
+    con.execute("PRAGMA synchronous=NORMAL")
+    con.execute("PRAGMA foreign_keys=ON")
+    return con
 
 def init_db():
+    """
+    Create all tables if they don't exist. Uses IF NOT EXISTS so it's
+    safe to call on every startup — existing data is never touched.
+    New columns are added via ALTER TABLE so old DBs upgrade cleanly.
+    """
     con = get_db()
     con.executescript("""
         CREATE TABLE IF NOT EXISTS db_meta (
@@ -157,12 +742,12 @@ def init_db():
         );
 
         CREATE TABLE IF NOT EXISTS users (
-            id           INTEGER PRIMARY KEY AUTOINCREMENT,
-            username     TEXT UNIQUE NOT NULL,
+            id            INTEGER PRIMARY KEY AUTOINCREMENT,
+            username      TEXT UNIQUE NOT NULL,
             password_hash TEXT NOT NULL,
-            salt         TEXT NOT NULL,
-            is_admin     INTEGER NOT NULL DEFAULT 0,
-            created_at   TEXT NOT NULL
+            salt          TEXT NOT NULL,
+            is_admin      INTEGER NOT NULL DEFAULT 0,
+            created_at    TEXT NOT NULL
         );
 
         CREATE TABLE IF NOT EXISTS account (
@@ -170,7 +755,8 @@ def init_db():
             user_id          INTEGER NOT NULL UNIQUE,
             cash             REAL NOT NULL DEFAULT 10000.0,
             initial_cash     REAL NOT NULL DEFAULT 10000.0,
-            starting_capital REAL NOT NULL DEFAULT 10000.0
+            starting_capital REAL NOT NULL DEFAULT 10000.0,
+            total_deposited  REAL NOT NULL DEFAULT 0.0
         );
 
         CREATE TABLE IF NOT EXISTS portfolio (
@@ -208,9 +794,81 @@ def init_db():
             added_at TEXT NOT NULL,
             UNIQUE(user_id, ticker)
         );
+
+        -- ── NEW v4: Cash deposit ledger ───────────────────────
+        CREATE TABLE IF NOT EXISTS deposits (
+            id         INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id    INTEGER NOT NULL,
+            timestamp  TEXT NOT NULL,
+            amount     REAL NOT NULL,
+            note       TEXT DEFAULT ''
+        );
+
+        -- ── NEW v4: DCA recurring schedules ──────────────────
+        CREATE TABLE IF NOT EXISTS dca_schedules (
+            id              INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id         INTEGER NOT NULL,
+            ticker          TEXT NOT NULL,
+            dollar_amount   REAL NOT NULL,
+            frequency_days  INTEGER NOT NULL,
+            next_run_date   TEXT NOT NULL,
+            is_active       INTEGER NOT NULL DEFAULT 1,
+            created_at      TEXT NOT NULL
+        );
+
+        -- ── NEW v4: DCA execution log ─────────────────────────
+        CREATE TABLE IF NOT EXISTS dca_log (
+            id          INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id     INTEGER NOT NULL,
+            schedule_id INTEGER NOT NULL,
+            timestamp   TEXT NOT NULL,
+            ticker      TEXT NOT NULL,
+            shares      REAL NOT NULL,
+            price       REAL NOT NULL,
+            amount      REAL NOT NULL,
+            status      TEXT NOT NULL DEFAULT 'ok'
+        );
     """)
+
+    # ── Migrate older DBs: add total_deposited column if missing ─
+    try:
+        con.execute("ALTER TABLE account ADD COLUMN total_deposited REAL NOT NULL DEFAULT 0.0")
+        con.commit()
+    except sqlite3.OperationalError:
+        pass   # column already exists
+
     con.commit()
     con.close()
+
+def _auto_backup():
+    """
+    Creates a daily timestamped backup of the SQLite DB file.
+    Keeps the 7 most recent backups and deletes older ones.
+    Called once per session (tracked via session_state).
+    """
+    if st.session_state.get("_backup_done"):
+        return
+    st.session_state["_backup_done"] = True
+
+    try:
+        os.makedirs(DB_BACKUP_DIR, exist_ok=True)
+        stamp   = datetime.now().strftime("%Y-%m-%d")
+        dst     = os.path.join(DB_BACKUP_DIR, f"midas_backup_{stamp}.db")
+        if not os.path.exists(dst) and os.path.exists(DB_PATH):
+            shutil.copy2(DB_PATH, dst)
+
+        # Prune: keep only the 7 most recent backups
+        backups = sorted(
+            [f for f in os.listdir(DB_BACKUP_DIR) if f.endswith(".db")],
+            reverse=True
+        )
+        for old in backups[7:]:
+            try:
+                os.remove(os.path.join(DB_BACKUP_DIR, old))
+            except Exception:
+                pass
+    except Exception:
+        pass   # backup is best-effort — never crash the app
 
 # ── User ops ──────────────────────────────────────────────
 
@@ -230,7 +888,8 @@ def db_create_user(username: str, password: str, is_admin: bool = False) -> tupl
         )
         uid = cur.lastrowid
         con.execute(
-            "INSERT INTO account (user_id,cash,initial_cash,starting_capital) VALUES (?,10000,10000,10000)",
+            "INSERT INTO account (user_id,cash,initial_cash,starting_capital,total_deposited) "
+            "VALUES (?,10000,10000,10000,0)",
             (uid,)
         )
         for t in ["AAPL", "MSFT", "NVDA", "SPY"]:
@@ -245,7 +904,6 @@ def db_create_user(username: str, password: str, is_admin: bool = False) -> tupl
         return False, "Username already taken."
 
 def db_authenticate(username: str, password: str):
-    """Returns user row dict or None."""
     con = get_db()
     row = con.execute(
         "SELECT id,username,password_hash,salt,is_admin FROM users WHERE username=?",
@@ -268,6 +926,30 @@ def db_all_users():
     return [{"id": r[0], "username": r[1], "is_admin": bool(r[2]), "created_at": r[3]}
             for r in rows]
 
+def db_get_user_is_admin(uid: int) -> bool:
+    con = get_db()
+    row = con.execute("SELECT is_admin FROM users WHERE id=?", (uid,)).fetchone()
+    con.close()
+    return bool(row[0]) if row else False
+
+def db_ensure_admin_exists():
+    con = get_db()
+    admin_count = con.execute(
+        "SELECT COUNT(*) FROM users WHERE is_admin=1"
+    ).fetchone()[0]
+    if admin_count == 0:
+        first = con.execute("SELECT id FROM users ORDER BY id LIMIT 1").fetchone()
+        if first:
+            con.execute("UPDATE users SET is_admin=1 WHERE id=?", (first[0],))
+            con.commit()
+    con.close()
+
+def db_set_admin(uid: int, is_admin: bool):
+    con = get_db()
+    con.execute("UPDATE users SET is_admin=? WHERE id=?", (int(is_admin), uid))
+    con.commit()
+    con.close()
+
 def db_delete_user(uid: int):
     con = get_db()
     con.executescript(f"""
@@ -277,6 +959,9 @@ def db_delete_user(uid: int):
         DELETE FROM trades         WHERE user_id={uid};
         DELETE FROM equity_history WHERE user_id={uid};
         DELETE FROM watchlist      WHERE user_id={uid};
+        DELETE FROM deposits       WHERE user_id={uid};
+        DELETE FROM dca_schedules  WHERE user_id={uid};
+        DELETE FROM dca_log        WHERE user_id={uid};
     """)
     con.commit()
     con.close()
@@ -293,9 +978,13 @@ def db_change_password(uid: int, new_password: str):
 def db_load_user_state(uid: int):
     con = get_db()
     row = con.execute(
-        "SELECT cash,initial_cash,starting_capital FROM account WHERE user_id=?", (uid,)
+        "SELECT cash,initial_cash,starting_capital,total_deposited FROM account WHERE user_id=?",
+        (uid,)
     ).fetchone()
-    cash, ic, sc = row if row else (10000.0, 10000.0, 10000.0)
+    if row:
+        cash, ic, sc, total_dep = row
+    else:
+        cash, ic, sc, total_dep = 10000.0, 10000.0, 10000.0, 0.0
 
     pos_rows = con.execute(
         "SELECT ticker,shares,avg_cost FROM portfolio WHERE user_id=?", (uid,)
@@ -321,7 +1010,8 @@ def db_load_user_state(uid: int):
     watchlist = [r[0] for r in wl_rows]
 
     con.close()
-    return cash, ic, sc, positions, trades_df, eq_hist, watchlist or ["AAPL", "MSFT", "NVDA", "SPY"]
+    return (cash, ic, sc, total_dep, positions, trades_df, eq_hist,
+            watchlist or ["AAPL", "MSFT", "NVDA", "SPY"])
 
 def db_save_trade(uid, time_str, side, ticker, shares, price, notional):
     con = get_db()
@@ -342,11 +1032,16 @@ def db_update_position(uid, ticker, shares, avg_cost):
         )
     con.commit(); con.close()
 
-def db_update_account(uid, cash, initial_cash, starting_capital):
+def db_update_account(uid, cash, initial_cash, starting_capital, total_deposited=None):
     con = get_db()
+    if total_deposited is None:
+        # fetch current value to avoid overwriting it
+        row = con.execute("SELECT total_deposited FROM account WHERE user_id=?", (uid,)).fetchone()
+        total_deposited = row[0] if row else 0.0
     con.execute(
-        "INSERT OR REPLACE INTO account (user_id,cash,initial_cash,starting_capital) VALUES (?,?,?,?)",
-        (uid, cash, initial_cash, starting_capital)
+        "INSERT OR REPLACE INTO account "
+        "(user_id,cash,initial_cash,starting_capital,total_deposited) VALUES (?,?,?,?,?)",
+        (uid, cash, initial_cash, starting_capital, total_deposited)
     )
     con.commit(); con.close()
 
@@ -373,11 +1068,112 @@ def db_reset_user(uid, starting_capital):
     con.execute("DELETE FROM trades          WHERE user_id=?", (uid,))
     con.execute("DELETE FROM portfolio       WHERE user_id=?", (uid,))
     con.execute("DELETE FROM equity_history  WHERE user_id=?", (uid,))
+    con.execute("DELETE FROM deposits        WHERE user_id=?", (uid,))
+    con.execute("DELETE FROM dca_schedules   WHERE user_id=?", (uid,))
+    con.execute("DELETE FROM dca_log         WHERE user_id=?", (uid,))
     con.execute(
-        "INSERT OR REPLACE INTO account (user_id,cash,initial_cash,starting_capital) VALUES (?,?,?,?)",
+        "INSERT OR REPLACE INTO account "
+        "(user_id,cash,initial_cash,starting_capital,total_deposited) VALUES (?,?,?,?,0)",
         (uid, starting_capital, starting_capital, starting_capital)
     )
     con.commit(); con.close()
+
+# ── Deposit ops ───────────────────────────────────────────
+
+def db_add_deposit(uid: int, amount: float, note: str = ""):
+    """Log a deposit and update cash + initial_cash in account row."""
+    con = get_db()
+    con.execute(
+        "INSERT INTO deposits (user_id,timestamp,amount,note) VALUES (?,?,?,?)",
+        (uid, datetime.now().isoformat(), amount, note)
+    )
+    # Increment cash, initial_cash, and total_deposited atomically
+    con.execute(
+        "UPDATE account SET cash=cash+?, initial_cash=initial_cash+?, "
+        "total_deposited=total_deposited+? WHERE user_id=?",
+        (amount, amount, amount, uid)
+    )
+    con.commit(); con.close()
+
+def db_get_deposit_history(uid: int):
+    con = get_db()
+    rows = con.execute(
+        "SELECT timestamp,amount,note FROM deposits WHERE user_id=? ORDER BY id DESC",
+        (uid,)
+    ).fetchall()
+    con.close()
+    return rows
+
+def db_get_total_deposited(uid: int) -> float:
+    con = get_db()
+    row = con.execute(
+        "SELECT total_deposited FROM account WHERE user_id=?", (uid,)
+    ).fetchone()
+    con.close()
+    return row[0] if row else 0.0
+
+# ── DCA ops ───────────────────────────────────────────────
+
+def db_create_dca(uid: int, ticker: str, dollar_amount: float,
+                  frequency_days: int) -> int:
+    """Create a new DCA schedule. Returns the new schedule ID."""
+    # First execution is one period from now
+    next_run = (datetime.now() + timedelta(days=frequency_days)).strftime("%Y-%m-%d")
+    con = get_db()
+    cur = con.execute(
+        "INSERT INTO dca_schedules "
+        "(user_id,ticker,dollar_amount,frequency_days,next_run_date,is_active,created_at) "
+        "VALUES (?,?,?,?,?,1,?)",
+        (uid, ticker, dollar_amount, frequency_days, next_run, datetime.now().isoformat())
+    )
+    new_id = cur.lastrowid
+    con.commit(); con.close()
+    return new_id
+
+def db_get_dca_schedules(uid: int):
+    """Return list of (id, ticker, dollar_amount, frequency_days, next_run_date, is_active)."""
+    con = get_db()
+    rows = con.execute(
+        "SELECT id,ticker,dollar_amount,frequency_days,next_run_date,is_active "
+        "FROM dca_schedules WHERE user_id=? ORDER BY id",
+        (uid,)
+    ).fetchall()
+    con.close()
+    return rows
+
+def db_toggle_dca(dca_id: int, is_active: bool):
+    con = get_db()
+    con.execute("UPDATE dca_schedules SET is_active=? WHERE id=?", (int(is_active), dca_id))
+    con.commit(); con.close()
+
+def db_delete_dca(dca_id: int):
+    con = get_db()
+    con.execute("DELETE FROM dca_schedules WHERE id=?", (dca_id,))
+    con.commit(); con.close()
+
+def db_update_dca_next_run(dca_id: int, next_run_date: str):
+    con = get_db()
+    con.execute("UPDATE dca_schedules SET next_run_date=? WHERE id=?", (next_run_date, dca_id))
+    con.commit(); con.close()
+
+def db_log_dca_execution(uid, schedule_id, ticker, shares, price, amount, status="ok"):
+    con = get_db()
+    con.execute(
+        "INSERT INTO dca_log (user_id,schedule_id,timestamp,ticker,shares,price,amount,status) "
+        "VALUES (?,?,?,?,?,?,?,?)",
+        (uid, schedule_id, datetime.now().isoformat(), ticker, shares, price, amount, status)
+    )
+    con.commit(); con.close()
+
+def db_get_dca_log(uid: int, limit: int = 50):
+    con = get_db()
+    rows = con.execute(
+        "SELECT timestamp,ticker,shares,price,amount,status FROM dca_log "
+        "WHERE user_id=? ORDER BY id DESC LIMIT ?",
+        (uid, limit)
+    ).fetchall()
+    con.close()
+    return rows
 
 # ============================================================
 # STREAMLIT CONFIG
@@ -387,10 +1183,11 @@ st.set_page_config(
     page_title="Midas Capital Systems",
     layout="wide",
     initial_sidebar_state="expanded",
-    menu_items={"About": "Midas Capital Systems v3.0 | Senior Project 2026"}
+    menu_items={"About": "Midas Capital Systems v4.0 | Senior Project 2026"}
 )
 
 init_db()
+db_ensure_admin_exists()
 
 # ============================================================
 # CSS
@@ -423,7 +1220,7 @@ html,body,[class*="css"]{
 .stTabs [data-baseweb="tab"]:hover{color:#fff!important;}
 .stTabs [data-baseweb="tab"] p,.stTabs [data-baseweb="tab"] span,.stTabs [data-baseweb="tab"] div{color:inherit!important;}
 
-/* Buttons — Zima Blue, black text */
+/* Buttons */
 .stButton>button{
     background:#6FC3DF!important;
     color:#000!important;
@@ -435,7 +1232,6 @@ html,body,[class*="css"]{
     transition:all 0.2s!important;
 }
 .stButton>button:hover{background:#5AB3CF!important;transform:scale(1.02)!important;}
-/* Force black text even when sidebar overrides to #ccc */
 [data-testid="stSidebar"] .stButton>button{color:#000!important;}
 
 /* Inputs */
@@ -453,11 +1249,6 @@ html,body,[class*="css"]{
     background:#111;border:1px solid #2a2a2a;border-radius:16px;
     padding:40px 44px;width:100%;max-width:420px;
 }
-.login-logo{text-align:center;margin-bottom:28px;}
-.login-logo .brand{font-size:20px;font-weight:900;color:#fff;letter-spacing:0.5px;}
-.login-logo .sub{font-size:11px;color:#3a3a3a;letter-spacing:2px;text-transform:uppercase;margin-top:3px;}
-.login-title{font-size:24px;font-weight:900;color:#fff;margin-bottom:6px;}
-.login-sub{font-size:13px;color:#555;margin-bottom:28px;}
 
 /* Ticker tape */
 .tape-wrap{background:#0a0a0a;border-bottom:1px solid #1a1a1a;padding:9px 0;
@@ -485,12 +1276,25 @@ html,body,[class*="css"]{
 /* Cards */
 .card{background:#111;border:1px solid #1e1e1e;border-radius:10px;padding:14px 16px;}
 
+/* DCA card */
+.dca-card{background:#0d1a0d;border:1px solid #1a3a1a;border-radius:10px;padding:14px 16px;margin-bottom:8px;}
+.dca-card.paused{background:#1a1a0d;border-color:#3a3a1a;}
+.dca-card.inactive{background:#1a0d0d;border-color:#3a1a1a;opacity:0.6;}
+
 /* Badges */
 .badge{display:inline-block;padding:3px 10px;border-radius:20px;font-size:12px;font-weight:700;}
 .badge-win{background:rgba(0,200,5,0.09);color:#00C805;border:1px solid rgba(0,200,5,0.25);}
 .badge-loss{background:rgba(255,80,0,0.09);color:#FF5000;border:1px solid rgba(255,80,0,0.25);}
 .badge-admin{background:rgba(212,160,23,0.12);color:#D4A017;border:1px solid rgba(212,160,23,0.3);
     padding:2px 10px;border-radius:20px;font-size:11px;font-weight:700;}
+.badge-dca{background:rgba(111,195,223,0.1);color:#6FC3DF;border:1px solid rgba(111,195,223,0.25);
+    padding:2px 10px;border-radius:20px;font-size:11px;font-weight:700;}
+.badge-dca-off{background:rgba(136,136,136,0.1);color:#888;border:1px solid #333;
+    padding:2px 10px;border-radius:20px;font-size:11px;font-weight:700;}
+
+/* Deposit pill */
+.dep-pill{background:rgba(0,200,5,0.08);border:1px solid rgba(0,200,5,0.2);
+    border-radius:8px;padding:10px 14px;margin:6px 0;}
 
 /* Market status dot */
 .dot{width:8px;height:8px;border-radius:50%;display:inline-block;margin-right:6px;
@@ -510,6 +1314,8 @@ html,body,[class*="css"]{
     padding:9px 14px;border-radius:8px;font-size:13px;margin:6px 0;}
 .alert-g{background:rgba(0,200,5,0.07);border:1px solid rgba(0,200,5,0.25);color:#00C805;
     padding:9px 14px;border-radius:8px;font-size:13px;margin:6px 0;}
+.alert-b{background:rgba(111,195,223,0.07);border:1px solid rgba(111,195,223,0.25);color:#6FC3DF;
+    padding:9px 14px;border-radius:8px;font-size:13px;margin:6px 0;}
 
 /* Admin panel */
 .admin-row{display:flex;align-items:center;justify-content:space-between;
@@ -528,8 +1334,6 @@ hr{border-color:#1e1e1e!important;}
 # ============================================================
 
 def logout():
-    """Clear all user-scoped session keys and rerun to login screen."""
-    preserve = {}   # nothing to preserve
     keys = list(st.session_state.keys())
     for k in keys:
         del st.session_state[k]
@@ -543,7 +1347,6 @@ def is_authenticated() -> bool:
 # ============================================================
 
 def show_auth_page():
-    # Centered card layout
     _, col, _ = st.columns([1, 1.2, 1])
     with col:
         _inject_html("""
@@ -585,12 +1388,9 @@ def show_auth_page():
         </div>
         """)
 
-        # Tab switcher via radio
-        # If registration just succeeded, default to "Sign In" by consuming the flag
-        # before the widget is instantiated (writing to a bound key after render crashes).
         default_tab_index = 0
         if st.session_state.pop("_switch_to_signin", False):
-            default_tab_index = 0   # Sign In is index 0
+            default_tab_index = 0
 
         auth_mode = st.radio(
             "", ["Sign In", "Create Account"],
@@ -598,7 +1398,6 @@ def show_auth_page():
             index=default_tab_index,
             label_visibility="collapsed"
         )
-
         st.markdown("---")
 
         if auth_mode == "Sign In":
@@ -610,14 +1409,12 @@ def show_auth_page():
             login_user = st.text_input("Username", key="login_user", placeholder="Enter username")
             login_pass = st.text_input("Password", key="login_pass",
                                        placeholder="Enter password", type="password")
-
             if st.button("Sign In", use_container_width=True, key="btn_login"):
                 if not login_user.strip() or not login_pass.strip():
                     st.error("Please enter both username and password.")
                 else:
                     user = db_authenticate(login_user.strip(), login_pass)
                     if user:
-                        # Load user data into session
                         st.session_state.user_id  = user["id"]
                         st.session_state.username = user["username"]
                         st.session_state.is_admin = user["is_admin"]
@@ -625,15 +1422,13 @@ def show_auth_page():
                         st.rerun()
                     else:
                         st.error("Invalid username or password.")
-
             if db_user_count() == 0:
                 _inject_html(
                     '<div class="alert-y" style="margin-top:16px;">'
                     '⚠ No accounts yet — use <b>Create Account</b> to register the first admin.'
                     '</div>'
                 )
-
-        else:  # Create Account
+        else:
             is_first = db_user_count() == 0
             if is_first:
                 _inject_html(
@@ -641,7 +1436,6 @@ def show_auth_page():
                     '🔑 First account created will be the <b>Administrator</b>.'
                     '</div>'
                 )
-
             st.markdown(
                 "<div style='font-size:18px;font-weight:700;margin-bottom:4px;'>Create account</div>"
                 "<div style='font-size:13px;color:#555;margin-bottom:20px;'>Start paper trading</div>",
@@ -650,11 +1444,8 @@ def show_auth_page():
             reg_user  = st.text_input("Choose a username", key="reg_user",  placeholder="e.g. trader_john")
             reg_pass  = st.text_input("Password",          key="reg_pass",  placeholder="Min 6 characters", type="password")
             reg_pass2 = st.text_input("Confirm password",  key="reg_pass2", placeholder="Repeat password",  type="password")
-
             if st.button("Create Account", use_container_width=True, key="btn_register"):
-                u = reg_user.strip()
-                p = reg_pass.strip()
-                p2 = reg_pass2.strip()
+                u, p, p2 = reg_user.strip(), reg_pass.strip(), reg_pass2.strip()
                 if not u or not p or not p2:
                     st.error("All fields are required.")
                 elif len(u) < 3:
@@ -683,10 +1474,11 @@ def show_auth_page():
 # ============================================================
 
 def _load_user_into_session(uid: int):
-    cash, ic, sc, positions, trades, eq_hist, watchlist = db_load_user_state(uid)
+    cash, ic, sc, total_dep, positions, trades, eq_hist, watchlist = db_load_user_state(uid)
     st.session_state.cash                   = cash
     st.session_state.initial_cash           = ic
     st.session_state.starting_capital_input = sc
+    st.session_state.total_deposited        = total_dep
     st.session_state.positions              = positions
     st.session_state.trades                 = trades
     st.session_state.equity_history         = eq_hist
@@ -699,6 +1491,7 @@ def _load_user_into_session(uid: int):
     st.session_state.sim_period             = "1 Year"
     st.session_state.auto_refresh           = True
     st.session_state.db_loaded              = True
+    st.session_state.dca_notifications      = []
 
 def init_state():
     if not is_authenticated():
@@ -707,14 +1500,18 @@ def init_state():
     if not st.session_state.get("db_loaded"):
         _load_user_into_session(uid)
 
+    st.session_state.is_admin = db_get_user_is_admin(uid)
+
     for k, v in {
-        "price_mode":    "Live (yfinance)",
-        "sim_seed":      42,
-        "sim_period":    "1 Year",
-        "auto_refresh":  True,
-        "win_streak":    0,
-        "loss_streak":   0,
-        "last_buy_ts":   {},
+        "price_mode":         "Live (yfinance)",
+        "sim_seed":           42,
+        "sim_period":         "1 Year",
+        "auto_refresh":       True,
+        "win_streak":         0,
+        "loss_streak":        0,
+        "last_buy_ts":        {},
+        "total_deposited":    0.0,
+        "dca_notifications":  [],
     }.items():
         if k not in st.session_state:
             st.session_state[k] = v
@@ -728,6 +1525,7 @@ if not is_authenticated():
     st.stop()
 
 init_state()
+_auto_backup()   # create daily backup on first load each session
 
 uid  = st.session_state.user_id
 mode = st.session_state.price_mode
@@ -773,7 +1571,7 @@ def ext_price(ticker):
         return None, None
 
 # ============================================================
-# PRICE ENGINE — Live + Improved GBM Simulation
+# PRICE ENGINE
 # ============================================================
 
 def _ticker_sector(ticker: str) -> str:
@@ -797,14 +1595,6 @@ def _live(ticker, period="6mo"):
 
 @st.cache_data(show_spinner=False)
 def _sim_gbm(ticker: str, days: int = 252, seed_base: int = 42) -> pd.Series:
-    """
-    Improved simulation using Geometric Brownian Motion with:
-    - Sector-appropriate drift (μ) and volatility (σ)
-    - Regime switching (bull / bear / sideways)
-    - Left-skewed fat-tail shocks via Student-t residuals
-    - Mean-reversion overlay (mild)
-    - Volume simulation proportional to absolute returns
-    """
     sector = _ticker_sector(ticker)
     params = SECTOR_SIM_PARAMS.get(sector, SECTOR_SIM_PARAMS["Unknown"])
     mu     = params["mu"]
@@ -812,23 +1602,20 @@ def _sim_gbm(ticker: str, days: int = 252, seed_base: int = 42) -> pd.Series:
 
     rng = np.random.default_rng((_h(ticker) + seed_base) % (2**31 - 1))
 
-    # ── Regime switching ─────────────────────────────────────
-    # Regimes: 0=Bull, 1=Sideways, 2=Bear (Markov chain)
     regime_trans = np.array([
-        [0.97, 0.02, 0.01],   # Bull  → Bull / Sideways / Bear
-        [0.03, 0.94, 0.03],   # Sideways
-        [0.02, 0.03, 0.95],   # Bear
+        [0.97, 0.02, 0.01],
+        [0.03, 0.94, 0.03],
+        [0.02, 0.03, 0.95],
     ])
-    regime_mu_adj   = [1.5, 0.2, -1.2]   # drift multipliers
-    regime_sig_adj  = [0.8, 1.0,  1.6]   # vol multipliers
+    regime_mu_adj  = [1.5, 0.2, -1.2]
+    regime_sig_adj = [0.8, 1.0,  1.6]
 
-    regime = 0   # start bull
+    regime = 0
     regimes = []
     for _ in range(days):
         regime = rng.choice(3, p=regime_trans[regime])
         regimes.append(regime)
 
-    # ── Returns (Student-t with ν=5 for fat tails) ───────────
     nu = 5
     t_shocks = rng.standard_t(nu, size=days) / np.sqrt(nu / (nu - 2))
 
@@ -838,8 +1625,6 @@ def _sim_gbm(ticker: str, days: int = 252, seed_base: int = 42) -> pd.Series:
         for i, r in enumerate(regimes)
     ])
 
-    # ── Mean-reversion overlay (mild) ────────────────────────
-    # Pulls returns back toward long-run mean when too far off
     cumlog = np.cumsum(returns)
     long_mu = mu * days
     mr_strength = 0.003
@@ -847,11 +1632,9 @@ def _sim_gbm(ticker: str, days: int = 252, seed_base: int = 42) -> pd.Series:
         deviation = cumlog[i-1] - long_mu * (i / days)
         returns[i] -= mr_strength * deviation
 
-    # ── Reconstruct price path ────────────────────────────────
     start_price = ANCHOR_PRICES.get(ticker, rng.uniform(50, 500))
     prices = start_price * np.exp(np.cumsum(returns))
 
-    # ── Volume (correlated with |return|, realistic) ──────────
     base_vol = rng.integers(500_000, 50_000_000)
     volume   = (base_vol * (1 + 5 * np.abs(returns) / sigma)
                 * rng.lognormal(0, 0.3, days)).astype(int)
@@ -865,7 +1648,6 @@ def price_df(ticker, mode, seed, period_key="1 Year"):
     if not t:
         return pd.DataFrame(), False
     if mode == "Live (yfinance)":
-        # Map period_key to yfinance period string
         yf_period_map = {
             "1 Month": "1mo", "3 Months": "3mo",
             "6 Months": "6mo", "1 Year": "1y", "2 Years": "2y",
@@ -938,10 +1720,10 @@ def run_model(df):
 
     last_row = df[FEATURE_COLS].iloc[-1]
     trend_score = int(sum([
-        last_row["SMA_5"]       > last_row["SMA_20"],
-        last_row["SMA_20"]      > last_row["SMA_50"],
-        last_row["MACD"]        > last_row["MACD_Signal"],
-        last_row["RSI"]         > 50,
+        last_row["SMA_5"]  > last_row["SMA_20"],
+        last_row["SMA_20"] > last_row["SMA_50"],
+        last_row["MACD"]   > last_row["MACD_Signal"],
+        last_row["RSI"]    > 50,
     ]))
     trend_bias = (trend_score - 2) * 0.005
     pred = pred * (1 + trend_bias)
@@ -1008,25 +1790,36 @@ def apply_capital(amount, period_key="1 Year"):
     st.session_state.cash                   = amount
     st.session_state.initial_cash           = amount
     st.session_state.starting_capital_input = amount
+    st.session_state.total_deposited        = 0.0
     st.session_state.positions              = {}
     st.session_state.trades = pd.DataFrame(
         columns=["Time", "Side", "Ticker", "Shares", "Price", "Notional"])
     st.session_state.equity_history = []
     st.session_state.win_streak  = 0
     st.session_state.loss_streak = 0
+    st.session_state.dca_notifications = []
 
-def place_order(side, ticker, shares, mode, seed, period_key="1 Year"):
+def place_order(side, ticker, shares, mode, seed, period_key="1 Year",
+                silent: bool = False):
+    """
+    Execute a BUY or SELL order.
+    silent=True suppresses st.success/st.error (used by DCA auto-executor).
+    Returns True on success, False on failure.
+    """
     t = ticker.strip().upper()
     if shares <= 0:
-        st.error("Shares must be > 0.")
+        if not silent:
+            st.error("Shares must be > 0.")
         return False
     if not ticker_ok(t, mode, seed):
-        st.error(f"'{t}' not found in current price mode.")
+        if not silent:
+            st.error(f"'{t}' not found in current price mode.")
         return False
 
     px = cur_price(t, mode, seed, period_key)
     if not np.isfinite(px):
-        st.error("Could not retrieve price.")
+        if not silent:
+            st.error("Could not retrieve price.")
         return False
 
     notional = shares * px
@@ -1034,7 +1827,8 @@ def place_order(side, ticker, shares, mode, seed, period_key="1 Year"):
 
     if side == "BUY":
         if notional > st.session_state.cash + 1e-9:
-            st.error("Insufficient cash.")
+            if not silent:
+                st.error("Insufficient cash.")
             return False
         st.session_state.cash -= notional
         if t not in st.session_state.positions:
@@ -1049,7 +1843,8 @@ def place_order(side, ticker, shares, mode, seed, period_key="1 Year"):
     else:  # SELL
         if t not in st.session_state.positions or \
                 st.session_state.positions[t]["shares"] < shares - 1e-9:
-            st.error("Not enough shares to sell.")
+            if not silent:
+                st.error("Not enough shares to sell.")
             return False
         profit = (px - st.session_state.positions[t]["avg_cost"]) * shares
         if profit >= 0:
@@ -1058,7 +1853,7 @@ def place_order(side, ticker, shares, mode, seed, period_key="1 Year"):
         else:
             st.session_state.loss_streak += 1
             st.session_state.win_streak   = 0
-            if st.session_state.loss_streak >= 3:
+            if st.session_state.loss_streak >= 3 and not silent:
                 st.info(random.choice(STOIC_QUOTES))
         st.session_state.cash += notional
         st.session_state.positions[t]["shares"] -= shares
@@ -1082,10 +1877,94 @@ def place_order(side, ticker, shares, mode, seed, period_key="1 Year"):
     db_add_equity(uid, m["equity"], tc)
     db_update_account(uid, st.session_state.cash,
                       st.session_state.initial_cash,
-                      st.session_state.starting_capital_input)
+                      st.session_state.starting_capital_input,
+                      st.session_state.total_deposited)
 
-    st.success(f"Order confirmed: {side} {shares:g} × {t} @ ${px:,.2f}  |  ${notional:,.2f}")
+    if not silent:
+        st.success(f"Order confirmed: {side} {shares:g} × {t} @ ${px:,.2f}  |  ${notional:,.2f}")
     return True
+
+# ============================================================
+# DEPOSIT ENGINE
+# ============================================================
+
+def do_deposit(amount: float, note: str = "Manual deposit"):
+    """
+    Add cash to the account. Updates both session state and DB atomically.
+    initial_cash also increases so that the return % tracks true trading gains,
+    not the inflated equity from deposits.
+    """
+    if amount <= 0:
+        st.error("Deposit amount must be greater than $0.")
+        return False
+    # DB write (atomic UPDATE)
+    db_add_deposit(uid, amount, note)
+    # Session state sync
+    st.session_state.cash         += amount
+    st.session_state.initial_cash += amount
+    st.session_state.total_deposited = db_get_total_deposited(uid)
+    st.success(f"💵 Deposited ${amount:,.2f} — new cash balance: ${st.session_state.cash:,.2f}")
+    return True
+
+# ============================================================
+# DCA ENGINE
+# ============================================================
+
+def process_dca_schedules(mode, seed, period_key):
+    """
+    Check all active DCA schedules for the current user.
+    Execute any that are due today or overdue.
+    Called once per session (guarded by session_state flag).
+    """
+    if st.session_state.get("_dca_processed"):
+        return
+    st.session_state["_dca_processed"] = True
+
+    schedules = db_get_dca_schedules(uid)
+    today     = datetime.now().strftime("%Y-%m-%d")
+    notes     = []
+
+    for sid, ticker, dollar_amount, freq_days, next_run, is_active in schedules:
+        if not is_active:
+            continue
+        if next_run > today:
+            continue
+
+        # Potentially multiple missed periods (e.g. app was closed for weeks)
+        run_date = datetime.strptime(next_run, "%Y-%m-%d")
+        while run_date.strftime("%Y-%m-%d") <= today:
+            px = cur_price(ticker, mode, seed, period_key)
+            if not np.isfinite(px) or px <= 0:
+                db_log_dca_execution(uid, sid, ticker, 0, 0, dollar_amount, "no_price")
+                notes.append(f"⚠ DCA skipped {ticker}: could not get price")
+                break
+
+            if dollar_amount > st.session_state.cash:
+                db_log_dca_execution(uid, sid, ticker, 0, px, dollar_amount, "insufficient_cash")
+                notes.append(f"⚠ DCA skipped {ticker}: insufficient cash (needed ${dollar_amount:,.2f})")
+                break
+
+            shares = dollar_amount / px
+            ok = place_order("BUY", ticker, shares, mode, seed, period_key, silent=True)
+            if ok:
+                db_log_dca_execution(uid, sid, ticker, shares, px, dollar_amount, "ok")
+                notes.append(
+                    f"✅ DCA auto-buy: {shares:.4f} shares of {ticker} "
+                    f"@ ${px:,.2f}  (${dollar_amount:,.2f})"
+                )
+            else:
+                db_log_dca_execution(uid, sid, ticker, 0, px, dollar_amount, "failed")
+                notes.append(f"⚠ DCA failed for {ticker}")
+                break
+
+            run_date += timedelta(days=freq_days)
+
+        # Advance next_run to the next future date
+        while run_date.strftime("%Y-%m-%d") <= today:
+            run_date += timedelta(days=freq_days)
+        db_update_dca_next_run(sid, run_date.strftime("%Y-%m-%d"))
+
+    st.session_state["dca_notifications"] = notes
 
 # ============================================================
 # UI HELPERS
@@ -1097,7 +1976,7 @@ def ticker_tape(mode, seed, period_key="1 Year"):
                 if t not in st.session_state.watchlist])[:18]
     items = ""
     for t in tickers:
-        px = cur_price(t, mode, seed, period_key)
+        px   = cur_price(t, mode, seed, period_key)
         df_, ok_ = price_df(t, mode, seed, period_key)
         chg = 0.0
         if ok_ and len(df_) > 1:
@@ -1171,6 +2050,9 @@ def mcard(label, value, sub=None, direction=None):
 period_key = st.session_state.get("sim_period", "1 Year")
 m = get_metrics(mode, seed, period_key)
 
+# Run DCA processor once per session (after mode/seed/period_key are set)
+process_dca_schedules(mode, seed, period_key)
+
 with st.sidebar:
     _inject_html("""
     <div style="padding:20px 0 14px;text-align:center;">
@@ -1210,7 +2092,6 @@ with st.sidebar:
     """)
     _inject_html("<hr>")
 
-    # User info
     admin_html = ' <span class="badge-admin">ADMIN</span>' if st.session_state.get("is_admin") else ""
     _inject_html(f"""
     <div style="margin-bottom:14px;">
@@ -1238,15 +2119,33 @@ with st.sidebar:
     # Account card
     rc  = RH_GREEN if m["ret"] >= 0 else RH_RED
     arr = "+" if m["ret"] >= 0 else "-"
+    total_dep = st.session_state.get("total_deposited", 0.0)
     _inject_html(f"""
     <div class="card" style="margin-bottom:14px;">
         <div class="mlbl">Account Value</div>
         <div style="font-size:22px;font-weight:900;color:#fff;">${m['equity']:,.2f}</div>
-        <div style="font-size:13px;color:{rc};margin-top:2px;">{arr}{abs(m['ret']):.2f}% all-time</div>
+        <div style="font-size:13px;color:{rc};margin-top:2px;">{arr}{abs(m['ret']):.2f}% trading return</div>
         <div style="font-size:11px;color:#444;margin-top:6px;">
             Cash ${m['cash']:,.2f} &middot; Held ${m['mv']:,.2f}
         </div>
+        {f'<div style="font-size:11px;color:#6FC3DF;margin-top:4px;">+${total_dep:,.2f} deposited</div>'
+          if total_dep > 0 else ''}
     </div>""")
+
+    # ── DEPOSIT FUNDS ──────────────────────────────────────
+    _inject_html("""
+    <div style="font-size:10px;color:#444;text-transform:uppercase;letter-spacing:1px;
+                margin-bottom:6px;">💵 Deposit Funds</div>
+    """)
+    dep_amount = st.number_input(
+        "dep", min_value=1.0, value=1000.0, step=100.0,
+        format="%.2f", label_visibility="collapsed", key="sidebar_deposit_amount"
+    )
+    if st.button("Deposit Cash", use_container_width=True, key="btn_sidebar_deposit"):
+        if do_deposit(float(dep_amount)):
+            st.rerun()
+
+    _inject_html("<hr>")
 
     # Data mode
     _inject_html('<div style="font-size:10px;color:#444;text-transform:uppercase;letter-spacing:1px;margin-bottom:6px;">Data Mode</div>')
@@ -1271,11 +2170,6 @@ with st.sidebar:
             label_visibility="collapsed",
             help="Change seed to generate different market scenarios."
         )
-        _inject_html("""
-        <div style="font-size:11px;color:#555;margin:6px 0 10px;line-height:1.5;">
-            GBM simulation with regime switching, fat-tail shocks, and sector-calibrated parameters.
-            Each ticker's behaviour matches its real-world sector characteristics.
-        </div>""")
 
     period_key = st.session_state.get("sim_period", "1 Year")
     seed       = int(st.session_state.sim_seed)
@@ -1324,6 +2218,13 @@ if mkt_code in ("pre", "after", "closed"):
         "closed": "Markets are closed. Prices reflect the last regular-session close.",
     }
     _inject_html(f'<div class="alert-y">{msgs[mkt_code]}</div>')
+
+# ── DCA execution notifications ───────────────────────────
+dca_notes = st.session_state.get("dca_notifications", [])
+if dca_notes:
+    for note in dca_notes:
+        cls = "alert-g" if note.startswith("✅") else "alert-y"
+        _inject_html(f'<div class="{cls}">{note}</div>')
 
 # ============================================================
 # TABS
@@ -1408,6 +2309,7 @@ with tab1:
 
     with stats_col:
         _inject_html('<div class="sh">Stats</div>')
+        active_dca = sum(1 for s in db_get_dca_schedules(uid) if s[5])
         _inject_html(f"""
         <div class="card" style="margin-bottom:8px;">
             <div class="mlbl">Total Trades</div>
@@ -1417,9 +2319,13 @@ with tab1:
             <div class="mlbl">Open Positions</div>
             <div style="font-size:22px;font-weight:900;">{len(st.session_state.positions)}</div>
         </div>
-        <div class="card">
+        <div class="card" style="margin-bottom:8px;">
             <div class="mlbl">Sharpe Ratio</div>
             <div style="font-size:22px;font-weight:900;">{m['sharpe']:.2f}</div>
+        </div>
+        <div class="card">
+            <div class="mlbl">Active DCA Plans</div>
+            <div style="font-size:22px;font-weight:900;color:#6FC3DF;">{active_dca}</div>
         </div>
         """)
 
@@ -1460,7 +2366,6 @@ with tab2:
                             MODEL SIGNAL: {res['signal']}
                         </div>""")
 
-                        # Trend Alignment panel
                         ta_score = res["trend_score"]
                         ta_label = res["trend_label"]
                         ta_col   = (RH_GREEN if ta_score >= 3 else
@@ -1488,15 +2393,13 @@ with tab2:
                             </div>
                         </div>""")
 
-                        # Feature importance
                         imp = pd.DataFrame({
                             "Feature":    list(res["importance"].keys()),
                             "Importance": list(res["importance"].values())
                         }).sort_values("Importance").tail(10)
                         fig_i = go.Figure(go.Bar(
                             x=imp["Importance"], y=imp["Feature"],
-                            orientation="h",
-                            marker=dict(color=RH_GREEN)
+                            orientation="h", marker=dict(color=RH_GREEN)
                         ))
                         fig_i.update_layout(
                             title="Top 10 Predictive Features",
@@ -1508,7 +2411,6 @@ with tab2:
                         )
                         st.plotly_chart(fig_i, use_container_width=True)
 
-                        # Technical charts
                         fig_t = make_subplots(
                             rows=3, cols=1,
                             subplot_titles=("Price & Moving Averages","RSI","MACD"),
@@ -1596,93 +2498,234 @@ with tab2:
         _inject_html(f'<div style="text-align:center;font-size:20px;font-weight:900;color:{mood_c};margin-top:-10px;">{mood_lbl}</div>')
 
 # ============================================================
-# TAB 3 — TRADE
+# TAB 3 — TRADE  (+ DCA scheduler)
 # ============================================================
 
 with tab3:
-    _inject_html('<div class="sh">Trading Interface</div>')
-    l_, r_ = st.columns([1, 2])
+    trade_subtab, dca_subtab = st.tabs(["📈 Manual Trade", "🔄 Auto-Invest (DCA)"])
 
-    with l_:
-        pick   = st.selectbox("Ticker", ALL_TICKERS)
-        manual = st.text_input("Or type manually", placeholder="e.g. AAPL")
-        tkr    = manual.strip().upper() if manual.strip() else pick
+    # ── Manual Trade ──────────────────────────────────────
+    with trade_subtab:
+        _inject_html('<div class="sh">Trading Interface</div>')
+        l_, r_ = st.columns([1, 2])
 
-        side       = st.radio("Order type", ["BUY","SELL"], horizontal=True)
-        shares_in  = st.number_input("Shares", min_value=0.0, value=1.0, step=1.0)
+        with l_:
+            pick   = st.selectbox("Ticker", ALL_TICKERS, key="trade_pick")
+            manual = st.text_input("Or type manually", placeholder="e.g. AAPL", key="trade_manual")
+            tkr    = manual.strip().upper() if manual.strip() else pick
 
-        px_   = cur_price(tkr, mode, seed, period_key)
-        ep_, el_ = ext_price(tkr) if mode == "Live (yfinance)" else (None, None)
+            side      = st.radio("Order type", ["BUY","SELL"], horizontal=True)
+            shares_in = st.number_input("Shares", min_value=0.0, value=1.0, step=1.0)
 
-        if np.isfinite(px_):
-            ext_html = (f"<div style='color:#f59e0b;font-size:11px;margin-top:4px;'>"
-                        f"{el_}: ${ep_:,.2f}</div>") if ep_ else ""
-            _inject_html(f"""
-            <div class="card" style="margin:12px 0;">
-                <div class="mlbl">Current Price</div>
-                <div class="mval">${px_:,.2f}</div>
-                {ext_html}
-            </div>
-            <div class="card">
-                <div class="mlbl">Order Value</div>
-                <div class="mval">${shares_in*px_:,.2f}</div>
-            </div>""")
+            px_   = cur_price(tkr, mode, seed, period_key)
+            ep_, el_ = ext_price(tkr) if mode == "Live (yfinance)" else (None, None)
 
-        _inject_html("<br>")
-        if st.button(f"{'Buy' if side=='BUY' else 'Sell'} {tkr}",
-                     use_container_width=True):
-            if place_order(side, tkr, float(shares_in), mode, seed, period_key):
-                st.rerun()
+            if np.isfinite(px_):
+                ext_html = (f"<div style='color:#f59e0b;font-size:11px;margin-top:4px;'>"
+                            f"{el_}: ${ep_:,.2f}</div>") if ep_ else ""
+                _inject_html(f"""
+                <div class="card" style="margin:12px 0;">
+                    <div class="mlbl">Current Price</div>
+                    <div class="mval">${px_:,.2f}</div>
+                    {ext_html}
+                </div>
+                <div class="card">
+                    <div class="mlbl">Order Value</div>
+                    <div class="mval">${shares_in*px_:,.2f}</div>
+                </div>""")
 
-        if mkt_code in ("after","pre","closed") and mode == "Live (yfinance)":
-            _inject_html('<div style="color:#f59e0b;font-size:11px;margin-top:8px;">Outside market hours — prices are last close</div>')
+            _inject_html("<br>")
+            if st.button(f"{'Buy' if side=='BUY' else 'Sell'} {tkr}",
+                         use_container_width=True):
+                if place_order(side, tkr, float(shares_in), mode, seed, period_key):
+                    st.rerun()
 
-    with r_:
-        df_, ok_ = price_df(tkr, mode, seed, period_key)
-        if ok_ and not df_.empty:
-            pnow   = df_["Close"].iloc[-1]
-            pstart = df_["Close"].iloc[0]
-            up     = pnow >= pstart
-            lc     = RH_GREEN if up else RH_RED
-            fc     = "rgba(0,200,5,0.07)" if up else "rgba(255,80,0,0.07)"
-            fig_c  = go.Figure()
-            fig_c.add_trace(go.Scatter(
-                x=df_.index, y=df_["Close"],
-                mode="lines", line=dict(color=lc,width=2),
-                fill="tozeroy", fillcolor=fc,
-                hovertemplate="%{x|%b %d}<br>$%{y:,.2f}<extra></extra>"
-            ))
-            fig_c.add_trace(go.Scatter(
-                x=[df_.index[-1]], y=[pnow],
-                mode="markers", marker=dict(size=8,color=lc)
-            ))
-            # Volume bar (secondary y) if available
-            if "Volume" in df_.columns:
-                fig_c.add_trace(go.Bar(
-                    x=df_.index, y=df_["Volume"],
-                    name="Volume",
-                    marker_color="rgba(111,195,223,0.15)",
-                    yaxis="y2"
+            if mkt_code in ("after","pre","closed") and mode == "Live (yfinance)":
+                _inject_html('<div style="color:#f59e0b;font-size:11px;margin-top:8px;">Outside market hours — prices are last close</div>')
+
+        with r_:
+            df_, ok_ = price_df(tkr, mode, seed, period_key)
+            if ok_ and not df_.empty:
+                pnow   = df_["Close"].iloc[-1]
+                pstart = df_["Close"].iloc[0]
+                up     = pnow >= pstart
+                lc     = RH_GREEN if up else RH_RED
+                fc     = "rgba(0,200,5,0.07)" if up else "rgba(255,80,0,0.07)"
+                fig_c  = go.Figure()
+                fig_c.add_trace(go.Scatter(
+                    x=df_.index, y=df_["Close"],
+                    mode="lines", line=dict(color=lc,width=2),
+                    fill="tozeroy", fillcolor=fc,
+                    hovertemplate="%{x|%b %d}<br>$%{y:,.2f}<extra></extra>"
                 ))
-                fig_c.update_layout(
-                    yaxis2=dict(
-                        overlaying="y", side="right",
-                        showgrid=False, showticklabels=False
+                fig_c.add_trace(go.Scatter(
+                    x=[df_.index[-1]], y=[pnow],
+                    mode="markers", marker=dict(size=8,color=lc)
+                ))
+                if "Volume" in df_.columns:
+                    fig_c.add_trace(go.Bar(
+                        x=df_.index, y=df_["Volume"],
+                        name="Volume",
+                        marker_color="rgba(111,195,223,0.15)",
+                        yaxis="y2"
+                    ))
+                    fig_c.update_layout(
+                        yaxis2=dict(
+                            overlaying="y", side="right",
+                            showgrid=False, showticklabels=False
+                        )
                     )
+                fig_c.update_layout(
+                    title=dict(text=f"{tkr} · ${pnow:,.2f} · {period_key}",
+                               font=dict(color="#fff",size=18)),
+                    plot_bgcolor="#111111",paper_bgcolor="#111111",
+                    font=dict(color="#fff"),height=430,
+                    xaxis=dict(gridcolor="#2a2a2a"),
+                    yaxis=dict(gridcolor="#2a2a2a"),
+                    hovermode="x unified",showlegend=False,
+                    margin=dict(l=10,r=10,t=50,b=10)
                 )
-            fig_c.update_layout(
-                title=dict(text=f"{tkr} · ${pnow:,.2f} · {period_key}",
-                           font=dict(color="#fff",size=18)),
-                plot_bgcolor="#111111",paper_bgcolor="#111111",
-                font=dict(color="#fff"),height=430,
-                xaxis=dict(gridcolor="#2a2a2a"),
-                yaxis=dict(gridcolor="#2a2a2a"),
-                hovermode="x unified",showlegend=False,
-                margin=dict(l=10,r=10,t=50,b=10)
+                st.plotly_chart(fig_c, use_container_width=True)
+            else:
+                st.error("No price data available.")
+
+    # ── DCA Scheduler ─────────────────────────────────────
+    with dca_subtab:
+        _inject_html('<div class="sh">Auto-Invest / Dollar Cost Averaging</div>')
+        _inject_html("""
+        <div class="alert-b">
+             <b>How DCA works:</b> Set a dollar amount and a frequency. Midas will automatically
+            purchase that dollar value of the stock every time the schedule is due when you open
+            the app. Missed periods (while the app was closed) are caught up on your next login.
+        </div>
+        """)
+
+        # ── Create new DCA schedule ───────────────────────
+        _inject_html('<div class="sh" style="font-size:15px;">Create New Auto-Invest Schedule</div>')
+        nc1, nc2, nc3, nc4 = st.columns([2, 1.5, 1.5, 1])
+
+        with nc1:
+            dca_pick   = st.selectbox("Stock", ALL_TICKERS, key="dca_ticker_pick")
+            dca_manual = st.text_input("Or type a ticker", placeholder="e.g. AAPL", key="dca_manual")
+            dca_ticker = dca_manual.strip().upper() if dca_manual.strip() else dca_pick
+
+        with nc2:
+            dca_amount = st.number_input(
+                "Dollar amount per buy ($)", min_value=1.0, value=100.0,
+                step=25.0, format="%.2f", key="dca_amount"
             )
-            st.plotly_chart(fig_c, use_container_width=True)
+
+        with nc3:
+            dca_freq_label = st.selectbox(
+                "Frequency", list(DCA_FREQUENCIES.keys()), key="dca_freq"
+            )
+            dca_freq_days = DCA_FREQUENCIES[dca_freq_label]
+
+        with nc4:
+            st.write("")
+            st.write("")
+            if st.button("➕ Add Schedule", use_container_width=True, key="btn_add_dca"):
+                if not ticker_ok(dca_ticker, mode, seed):
+                    st.error(f"Ticker '{dca_ticker}' not found.")
+                elif dca_amount <= 0:
+                    st.error("Amount must be > $0.")
+                else:
+                    db_create_dca(uid, dca_ticker, dca_amount, dca_freq_days)
+                    st.success(
+                        f"✅ DCA schedule created: ${dca_amount:,.2f} of {dca_ticker} "
+                        f"every {dca_freq_label.lower()}. "
+                        f"First buy in {dca_freq_days} day(s)."
+                    )
+                    st.rerun()
+
+        # ── Active schedules ──────────────────────────────
+        _inject_html('<div class="sh" style="font-size:15px;">Your Schedules</div>')
+        schedules = db_get_dca_schedules(uid)
+
+        if not schedules:
+            st.info("No DCA schedules yet. Create one above to start auto-investing.")
         else:
-            st.error("No price data available.")
+            for sid, ticker, dollar_amount, freq_days, next_run, is_active in schedules:
+                freq_name = next(
+                    (k for k, v in DCA_FREQUENCIES.items() if v == freq_days),
+                    f"Every {freq_days}d"
+                )
+                px_now = cur_price(ticker, mode, seed, period_key)
+                shares_preview = dollar_amount / px_now if np.isfinite(px_now) and px_now > 0 else 0
+
+                days_until = (datetime.strptime(next_run, "%Y-%m-%d") - datetime.now()).days
+                next_label = (
+                    "Today" if days_until <= 0 else
+                    f"Tomorrow" if days_until == 1 else
+                    f"In {days_until} days ({next_run})"
+                )
+
+                status_badge = (
+                    '<span class="badge-dca">● ACTIVE</span>' if is_active else
+                    '<span class="badge-dca-off">⏸ PAUSED</span>'
+                )
+
+                _inject_html(f"""
+                <div class="{'dca-card' if is_active else 'dca-card inactive'}">
+                    <div style="display:flex;justify-content:space-between;align-items:center;">
+                        <div>
+                            <span style="font-size:18px;font-weight:900;color:#fff;">{ticker}</span>
+                            &nbsp;&nbsp;{status_badge}
+                        </div>
+                        <div style="font-size:13px;color:#888;">ID #{sid}</div>
+                    </div>
+                    <div style="margin-top:8px;display:flex;gap:28px;font-size:13px;">
+                        <div>
+                            <div style="color:#555;font-size:10px;text-transform:uppercase;letter-spacing:1px;">Amount</div>
+                            <div style="color:#fff;font-weight:700;">${dollar_amount:,.2f}</div>
+                        </div>
+                        <div>
+                            <div style="color:#555;font-size:10px;text-transform:uppercase;letter-spacing:1px;">Frequency</div>
+                            <div style="color:#fff;font-weight:700;">{freq_name}</div>
+                        </div>
+                        <div>
+                            <div style="color:#555;font-size:10px;text-transform:uppercase;letter-spacing:1px;">Next Buy</div>
+                            <div style="color:#6FC3DF;font-weight:700;">{next_label}</div>
+                        </div>
+                        <div>
+                            <div style="color:#555;font-size:10px;text-transform:uppercase;letter-spacing:1px;">~Shares / buy</div>
+                            <div style="color:#fff;font-weight:700;">
+                                {f'{shares_preview:.4f}' if shares_preview > 0 else '—'}
+                            </div>
+                        </div>
+                    </div>
+                </div>
+                """)
+
+                btn_col1, btn_col2, _ = st.columns([1, 1, 4])
+                with btn_col1:
+                    toggle_label = "⏸ Pause" if is_active else "▶ Resume"
+                    if st.button(toggle_label, key=f"dca_toggle_{sid}", use_container_width=True):
+                        db_toggle_dca(sid, not is_active)
+                        st.rerun()
+                with btn_col2:
+                    if st.button("🗑 Delete", key=f"dca_del_{sid}", use_container_width=True):
+                        db_delete_dca(sid)
+                        st.success(f"Deleted schedule #{sid}")
+                        st.rerun()
+
+        # ── DCA execution history ─────────────────────────
+        dca_log = db_get_dca_log(uid, limit=30)
+        if dca_log:
+            _inject_html('<div class="sh" style="font-size:15px;">Auto-Invest History</div>')
+            log_rows = []
+            for ts, tkr, shs, px, amt, stat in dca_log:
+                status_icon = "✅" if stat == "ok" else "⚠"
+                log_rows.append({
+                    "": status_icon,
+                    "Time": ts[:16],
+                    "Ticker": tkr,
+                    "Shares": f"{shs:.4f}" if stat == "ok" else "—",
+                    "Price":  f"${px:,.2f}" if stat == "ok" else "—",
+                    "Amount": f"${amt:,.2f}",
+                    "Status": stat,
+                })
+            st.dataframe(pd.DataFrame(log_rows), use_container_width=True, hide_index=True)
 
 # ============================================================
 # TAB 4 — PORTFOLIO
@@ -1812,7 +2855,6 @@ with tab5:
         data_range = mx - mn
         pad        = max(data_range * 0.15, 10)
 
-        # Equity curve
         fig_eq = go.Figure()
         fig_eq.add_hline(y=ic, line_dash="dot", line_color="#444",
                          annotation_text="Starting Capital",
@@ -1828,7 +2870,7 @@ with tab5:
         ))
         fig_eq.update_layout(
             title=dict(
-                text=f"Equity Curve · {'+'if is_up else ''}{ret_[-1]:.2f}% total return",
+                text=f"Equity Curve · {'+'if is_up else ''}{ret_[-1]:.2f}% trading return",
                 font=dict(color=lc,size=16)
             ),
             xaxis=dict(title="Trade Number",gridcolor="#2a2a2a",color="#888",
@@ -1842,7 +2884,6 @@ with tab5:
         )
         st.plotly_chart(fig_eq, use_container_width=True)
 
-        # Return bars
         fig_r = go.Figure(go.Bar(
             x=tcount, y=ret_,
             marker_color=[RH_GREEN if r>=0 else RH_RED for r in ret_],
@@ -1859,7 +2900,6 @@ with tab5:
         )
         st.plotly_chart(fig_r, use_container_width=True)
 
-        # Monte Carlo
         if len(evals) >= 5:
             _inject_html('<div class="sh">Monte Carlo Projection — 30 Trading Days</div>')
             rets_arr = np.diff(evals) / np.array(evals[:-1])
@@ -1909,6 +2949,15 @@ with tab5:
         )
     else:
         st.info("No trades yet.")
+
+    # ── Deposit History ───────────────────────────────────
+    dep_hist = db_get_deposit_history(uid)
+    if dep_hist:
+        _inject_html('<div class="sh">Deposit History</div>')
+        dep_df = pd.DataFrame(dep_hist, columns=["Time", "Amount", "Note"])
+        dep_df["Amount"] = dep_df["Amount"].apply(lambda x: f"${x:,.2f}")
+        dep_df["Time"]   = dep_df["Time"].apply(lambda x: x[:16])
+        st.dataframe(dep_df, use_container_width=True, hide_index=True)
 
 # ============================================================
 # TAB 6 — HEATMAP
@@ -1969,7 +3018,6 @@ with tab6:
         st.info("No positions to display.")
 
     _inject_html('<div class="sh">S&P 500 Universe — Daily Change</div>')
-
     univ_rows = []
     for _, row in UNIVERSE.iterrows():
         px_      = cur_price(row["Ticker"], mode, seed, period_key)
@@ -2019,7 +3067,7 @@ with tab6:
     st.plotly_chart(fig_u, use_container_width=True)
 
 # ============================================================
-# TAB 7 — ADMIN PANEL  (only shown to admins)
+# TAB 7 — ADMIN PANEL
 # ============================================================
 
 if tab_admin is not None:
@@ -2029,8 +3077,7 @@ if tab_admin is not None:
         users = db_all_users()
         total_users = len(users)
 
-        # Summary metrics
-        a1, a2 = st.columns(2)
+        a1, a2, a3 = st.columns(3)
         with a1:
             _inject_html(f"""
             <div class="card" style="margin-bottom:12px;">
@@ -2044,26 +3091,79 @@ if tab_admin is not None:
                 <div class="mlbl">Administrators</div>
                 <div style="font-size:28px;font-weight:900;">{admin_count}</div>
             </div>""")
+        with a3:
+            # Count backup files
+            backup_count = 0
+            oldest_backup = "—"
+            if os.path.exists(DB_BACKUP_DIR):
+                bfiles = sorted([f for f in os.listdir(DB_BACKUP_DIR) if f.endswith(".db")])
+                backup_count = len(bfiles)
+                if bfiles:
+                    oldest_backup = bfiles[0].replace("midas_backup_","").replace(".db","")
+            _inject_html(f"""
+            <div class="card" style="margin-bottom:12px;">
+                <div class="mlbl">DB Backups Stored</div>
+                <div style="font-size:28px;font-weight:900;">{backup_count}</div>
+                <div style="font-size:11px;color:#555;margin-top:4px;">Oldest: {oldest_backup}</div>
+            </div>""")
+
+        # ── DB Backup controls ────────────────────────────
+        _inject_html('<div class="sh">Database & Persistence</div>')
+        _inject_html("""
+        <div class="alert-b">
+            🔒 <b>Data Persistence:</b> All account data, trades, deposits, and DCA schedules
+            are stored in <code>midas_capital_v4.db</code> (SQLite, WAL mode). A rolling 7-day
+            backup is automatically created in <code>midas_backups/</code> on first login each day.
+            As long as the server's filesystem is persistent (local or VM), no data will be lost
+            regardless of how long the app is unused.
+        </div>
+        """)
+
+        bk1, bk2 = st.columns(2)
+        with bk1:
+            if st.button("📦 Create Manual Backup Now", use_container_width=True):
+                try:
+                    os.makedirs(DB_BACKUP_DIR, exist_ok=True)
+                    stamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+                    dst   = os.path.join(DB_BACKUP_DIR, f"midas_manual_{stamp}.db")
+                    shutil.copy2(DB_PATH, dst)
+                    st.success(f"Backup saved → {dst}")
+                except Exception as e:
+                    st.error(f"Backup failed: {e}")
+
+        with bk2:
+            # Download the live DB
+            if os.path.exists(DB_PATH):
+                with open(DB_PATH, "rb") as f:
+                    db_bytes = f.read()
+                st.download_button(
+                    label="⬇ Download DB File",
+                    data=db_bytes,
+                    file_name=f"midas_capital_backup_{datetime.now().strftime('%Y%m%d_%H%M%S')}.db",
+                    mime="application/octet-stream",
+                    use_container_width=True,
+                )
 
         _inject_html('<div class="sh">All Accounts</div>')
-
-        # User table
         user_rows = []
         for u in users:
             con = get_db()
             tc  = con.execute("SELECT COUNT(*) FROM trades WHERE user_id=?", (u["id"],)).fetchone()[0]
-            acc = con.execute("SELECT cash,initial_cash FROM account WHERE user_id=?", (u["id"],)).fetchone()
+            acc = con.execute("SELECT cash,initial_cash,total_deposited FROM account WHERE user_id=?", (u["id"],)).fetchone()
+            dca_count = con.execute("SELECT COUNT(*) FROM dca_schedules WHERE user_id=? AND is_active=1", (u["id"],)).fetchone()[0]
             con.close()
-            cash_val = acc[0] if acc else 0
-            ic_val   = acc[1] if acc else 0
-            pnl = cash_val - ic_val
+            cash_val  = acc[0] if acc else 0
+            ic_val    = acc[1] if acc else 0
+            dep_val   = acc[2] if acc else 0
             user_rows.append({
                 "ID": u["id"],
-                "Username":  u["username"],
-                "Role":      "Admin" if u["is_admin"] else "Trader",
-                "Trades":    tc,
-                "Cash":      f"${cash_val:,.2f}",
-                "Created":   u["created_at"][:10],
+                "Username":    u["username"],
+                "Role":        "Admin" if u["is_admin"] else "Trader",
+                "Trades":      tc,
+                "Cash":        f"${cash_val:,.2f}",
+                "Deposited":   f"${dep_val:,.2f}",
+                "Active DCA":  dca_count,
+                "Created":     u["created_at"][:10],
             })
         st.dataframe(pd.DataFrame(user_rows), use_container_width=True, hide_index=True)
 
@@ -2082,7 +3182,7 @@ if tab_admin is not None:
                 confirm = st.checkbox("I confirm this action is irreversible", key="del_confirm")
                 if st.button("Delete Account", key="btn_delete") and confirm:
                     db_delete_user(del_uid)
-                    st.success(f"Account deleted.")
+                    st.success("Account deleted.")
                     st.rerun()
             else:
                 st.info("No other accounts to delete.")
@@ -2097,7 +3197,6 @@ if tab_admin is not None:
                                              value=10000.0, step=1000.0, key="rst_cap")
             if st.button("Reset Portfolio", key="btn_rst_port"):
                 db_reset_user(rst_uid, rst_capital)
-                # If resetting own account, reload session
                 if rst_uid == uid:
                     _load_user_into_session(uid)
                 st.success(f"Portfolio reset to ${rst_capital:,.2f}.")
@@ -2149,6 +3248,47 @@ if tab_admin is not None:
                     db_change_password(cp_uid, new_cpw.strip())
                     st.success("Password updated.")
 
+        _inject_html('<div class="sh">Admin Privileges</div>')
+        _inject_html(
+            '<div class="alert-y" style="margin-bottom:12px;">'
+            '⚠ Revoking your own admin rights will remove the Admin tab immediately on next reload.'
+            '</div>'
+        )
+        priv_col1, priv_col2 = st.columns(2)
+        with priv_col1:
+            priv_options = {
+                f"{u['username']} (ID {u['id']}) — {'Admin' if u['is_admin'] else 'Trader'}": u
+                for u in users
+            }
+            priv_choice = st.selectbox(
+                "Select account", list(priv_options.keys()), key="priv_sel"
+            )
+            selected_u = priv_options[priv_choice]
+        with priv_col2:
+            current_flag = selected_u["is_admin"]
+            new_flag     = st.checkbox(
+                "Grant administrator privileges",
+                value=current_flag,
+                key="priv_flag"
+            )
+            if st.button("Save Privileges", key="btn_priv"):
+                if not new_flag:
+                    remaining = sum(1 for u in users if u["is_admin"] and u["id"] != selected_u["id"])
+                    if remaining == 0:
+                        st.error("Cannot remove the last administrator.")
+                    else:
+                        db_set_admin(selected_u["id"], False)
+                        if selected_u["id"] == uid:
+                            st.session_state.is_admin = False
+                        st.success(f"Admin rights removed from {selected_u['username']}.")
+                        st.rerun()
+                else:
+                    db_set_admin(selected_u["id"], True)
+                    if selected_u["id"] == uid:
+                        st.session_state.is_admin = True
+                    st.success(f"Admin rights granted to {selected_u['username']}.")
+                    st.rerun()
+
 # ============================================================
 # AUTO-REFRESH
 # ============================================================
@@ -2165,6 +3305,9 @@ _inject_html("""
 <hr>
 <div style="text-align:center;color:#2a2a2a;font-size:11px;padding:16px 0;">
     &copy; 2026 Midas Capital Systems &middot; Andrew Ignatius &middot; Senior Capstone Project<br>
-    <span style="font-size:10px;">Simulated trading only. Not financial advice.</span>
+    <span style="font-size:10px;">
+        v4.0 · Cash Deposits · DCA Auto-Invest · WAL DB · Daily Backups<br>
+        Simulated trading only. Not financial advice.
+    </span>
 </div>
 """)
