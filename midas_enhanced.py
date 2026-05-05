@@ -3111,7 +3111,7 @@ if tab_admin is not None:
         _inject_html('<div class="sh">Database & Persistence</div>')
         _inject_html("""
         <div class="alert-b">
-            🔒 <b>Data Persistence:</b> All account data, trades, deposits, and DCA schedules
+             <b>Data Persistence:</b> All account data, trades, deposits, and DCA schedules
             are stored in <code>midas_capital_v4.db</code> (SQLite, WAL mode). A rolling 7-day
             backup is automatically created in <code>midas_backups/</code> on first login each day.
             As long as the server's filesystem is persistent (local or VM), no data will be lost
@@ -3121,7 +3121,7 @@ if tab_admin is not None:
 
         bk1, bk2 = st.columns(2)
         with bk1:
-            if st.button("📦 Create Manual Backup Now", use_container_width=True):
+            if st.button("Create Manual Backup Now", use_container_width=True):
                 try:
                     os.makedirs(DB_BACKUP_DIR, exist_ok=True)
                     stamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
