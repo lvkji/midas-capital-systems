@@ -2502,7 +2502,7 @@ with tab2:
 # ============================================================
 
 with tab3:
-    trade_subtab, dca_subtab = st.tabs(["📈 Manual Trade", "🔄 Auto-Invest (DCA)"])
+    trade_subtab, dca_subtab = st.tabs(["Manual Trade", "Auto-Invest (DCA)"])
 
     # ── Manual Trade ──────────────────────────────────────
     with trade_subtab:
@@ -2632,7 +2632,7 @@ with tab3:
                 else:
                     db_create_dca(uid, dca_ticker, dca_amount, dca_freq_days)
                     st.success(
-                        f"✅ DCA schedule created: ${dca_amount:,.2f} of {dca_ticker} "
+                        f"DCA schedule created: ${dca_amount:,.2f} of {dca_ticker} "
                         f"every {dca_freq_label.lower()}. "
                         f"First buy in {dca_freq_days} day(s)."
                     )
