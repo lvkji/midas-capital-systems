@@ -1383,7 +1383,7 @@ def show_auth_page():
                 Midas Capital Systems
             </div>
             <div style="font-size:10px;color:#3a3a3a;letter-spacing:2px;text-transform:uppercase;margin-top:4px;">
-                Paper Trading Platform
+                Paper Trading Platform Developed by Andrew Ignatius
             </div>
         </div>
         """)
@@ -1433,7 +1433,7 @@ def show_auth_page():
             if is_first:
                 _inject_html(
                     '<div class="alert-g" style="margin-bottom:16px;">'
-                    '🔑 First account created will be the <b>Administrator</b>.'
+                    'First account created will be the <b>Administrator</b>.'
                     '</div>'
                 )
             st.markdown(
@@ -1903,7 +1903,7 @@ def do_deposit(amount: float, note: str = "Manual deposit"):
     st.session_state.cash         += amount
     st.session_state.initial_cash += amount
     st.session_state.total_deposited = db_get_total_deposited(uid)
-    st.success(f"💵 Deposited ${amount:,.2f} — new cash balance: ${st.session_state.cash:,.2f}")
+    st.success(f"Deposited ${amount:,.2f} — new cash balance: ${st.session_state.cash:,.2f}")
     return True
 
 # ============================================================
@@ -1949,7 +1949,7 @@ def process_dca_schedules(mode, seed, period_key):
             if ok:
                 db_log_dca_execution(uid, sid, ticker, shares, px, dollar_amount, "ok")
                 notes.append(
-                    f"✅ DCA auto-buy: {shares:.4f} shares of {ticker} "
+                    f"DCA auto-buy: {shares:.4f} shares of {ticker} "
                     f"@ ${px:,.2f}  (${dollar_amount:,.2f})"
                 )
             else:
@@ -2135,7 +2135,7 @@ with st.sidebar:
     # ── DEPOSIT FUNDS ──────────────────────────────────────
     _inject_html("""
     <div style="font-size:10px;color:#444;text-transform:uppercase;letter-spacing:1px;
-                margin-bottom:6px;">💵 Deposit Funds</div>
+                margin-bottom:6px;">Deposit Funds</div>
     """)
     dep_amount = st.number_input(
         "dep", min_value=1.0, value=1000.0, step=100.0,
