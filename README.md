@@ -1,8 +1,6 @@
 # Midas Capital Systems - Quick Start Guide
 
-## 🚀 Super Easy Setup (Recommended)
-
-### Option 1: Use the setup script (easiest!)
+### Option 1: Use the setup script
 
 ```bash
 # Make the script executable
@@ -28,7 +26,7 @@ chmod +x run.sh
 
 ---
 
-## 📋 Manual Setup (if you prefer)
+## Manual Setup
 
 ### Step 1: Create Virtual Environment
 ```bash
@@ -57,7 +55,7 @@ deactivate
 
 ---
 
-## 🔧 Troubleshooting
+## Troubleshooting
 
 ### Issue: "python3-venv not found"
 ```bash
@@ -84,7 +82,7 @@ pip install streamlit
 
 ---
 
-## ✨ What's Included
+## `What's Included
 
 ### Files:
 - `midas_enhanced.py` - Main application
@@ -94,18 +92,18 @@ pip install streamlit
 - `PROJECT_GUIDE.md` - Feature ideas and implementation guide
 
 ### Features:
-- ✅ Real-time price updates (auto-refresh)
-- ✅ Machine learning predictions (Random Forest)
-- ✅ Technical analysis (15 indicators)
-- ✅ Beautiful UI with animations
-- ✅ Interactive Plotly charts
-- ✅ Portfolio analytics (Sharpe ratio, returns)
-- ✅ Sector allocation
-- ✅ Trade history
+- Real-time price updates (auto-refresh)
+- Machine learning predictions (Random Forest)
+- Technical analysis (15 indicators)
+- Beautiful UI with animations
+- Interactive Plotly charts
+- Portfolio analytics (Sharpe ratio, returns)
+- Sector allocation
+- Trade history
 
 ---
 
-## 📊 Quick Demo Flow
+## Quick Demo Flow
 
 1. **Start the app** (it opens in browser automatically)
 2. **Dashboard Tab** - See your account overview
@@ -119,29 +117,9 @@ pip install streamlit
 
 ---
 
-## 🎯 Pro Tips
-
-### For Development:
-- Use Live Mode (yfinance) for real market data
-- Enable auto-refresh in sidebar
-- Test ML predictions on different stocks
-
-### For Demos:
-- Use Simulated Mode if internet is spotty
-- Change the seed to show different scenarios
-- Pre-populate watchlist with diverse sectors
-- Reset account before presenting
-
-### For Presentation:
-1. Start with AI Insights tab (most impressive!)
-2. Show a prediction with confidence scores
-3. Execute a trade based on the AI signal
-4. Show sector allocation updating
-5. Display the equity curve
-
 ---
 
-## 🚦 Common Commands
+## Common Commands
 
 ```bash
 # Activate virtual environment
@@ -162,56 +140,15 @@ deactivate
 
 ---
 
-## 📈 Performance Comparison
-
-| Feature | Robinhood | Midas Capital |
-|---------|-----------|---------------|
-| ML Predictions | ❌ | ✅ |
-| Technical Analysis | Basic | Advanced (15 indicators) |
-| Risk Metrics | Limited | Comprehensive |
-| Educational | Minimal | Built-in |
-| Customization | Low | High |
-| Open Source | ❌ | ✅ |
-
 ---
 
-## 🎓 Academic Highlights
-
-This project demonstrates:
-- Machine Learning (Random Forest, technical indicators)
-- Data Visualization (Plotly, custom charts)
-- Full-Stack Development (Python, Streamlit, CSS)
-- Financial Domain Knowledge
-- Software Engineering (virtual environments, caching)
-- UX/UI Design (custom styling, animations)
-
----
-
-## 📝 Next Steps
-
-See `PROJECT_GUIDE.md` for:
-- 15+ additional features to implement
-- LSTM neural network integration
-- Sentiment analysis with FinBERT
-- Backtesting engine
-- Dark mode
-- Mobile responsive design
-- And much more!
-
----
-
-## 👤 Project Info
+## Project Info
 
 **Developer:** Andrew Ignatius  
 **Year:** 2026  
 **Project:** Senior Project - AI-Powered Paper Trading Platform
 
 ---
-
-## 🆘 Need Help?
-
-### Virtual Environment Issues
-The virtual environment keeps your project dependencies isolated from your system Python. This is best practice!
 
 **Always remember to activate before running:**
 ```bash
@@ -227,11 +164,6 @@ source midas_env/bin/activate
 If the browser doesn't open automatically:
 1. Look for the URL in the terminal (usually `http://localhost:8501`)
 2. Copy and paste it into your browser
-
-### ML Prediction Issues
-- Predictions require 60+ days of historical data
-- Some tickers may not have enough history
-- Try popular stocks like AAPL, MSFT, GOOGL first
 
 ---
 
